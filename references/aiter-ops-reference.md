@@ -77,7 +77,7 @@ AITER 在 **FP8** 路径上区分 **OCP** 与 **非 OCP（FNUZ）** 变体（具
 | **标准算子 + 常见 shape + 已支持 dtype** | 优先 **AITER**，并用 **op_tests** 与业务 case 做回归。 |
 | **库中无覆盖的融合 或 特殊 mask/layout** | **自定义 kernel**（CK / Triton / asm），并以 **AITER 最接近子算子** 为性能下界。 |
 | **性能不达标** | 先对照 **CSV/JSON** 是否与当前 **模型 tier、arch、batch** 匹配，再考虑自定义。 |
-| **罕见精度组合** | 先查 **FP8 / INT4 / MXFP4** 分支；若无，则自定义并注意 **§3 架构差异**。 |
+| **罕见精度组合** | 先查 **FP8 / INT4 / MXFP4** 分支；若无，则自定义并注意上文 **架构差异** 小节。 |
 
 ## 7. Benchmark 对比（示意）
 
@@ -88,7 +88,67 @@ AITER 在 **FP8** 路径上区分 **OCP** 与 **非 OCP（FNUZ）** 变体（具
 # python scripts/benchmark_kernel.py --kernel my_kernel.py --op attention --baseline aiter
 ```
 
-## 8. 与 CK 文档的衔接
+### DeepSeek-R1 / V3 系列上的 AITER 加速比（公开博文，MI300X）
+
+下列为相对未启用 **AITER** 基线的量级（具体模型与批次以原文为准）：
+
+| 算子 / 场景 | Speedup |
+|-------------|---------|
+| **MLA decode** | **17×** |
+| **Block-scale fused MoE** | **3×** |
+| **Block-scale GEMM** | **2×** |
+| **MHA prefill** | **14×** |
+| **End-to-end（SGLang，8×MI300X）** | **2.1×**（例如 **6484 → 13704 tok/s**） |
+
+## 8. 与 SGLang / vLLM 集成及 PD 分离
+
+### SGLang
+
+```bash
+export SGLANG_USE_AITER=1
+```
+
+可与 **FlyDSL MoE** 等组合（示例）：`AITER_USE_FLYDSL_MOE=1` 及 `--disable-radix-cache --enable-torch-compile` 等，以仓库与场景为准。
+
+### vLLM（ROCm）
+
+总开关：
+
+```bash
+export VLLM_ROCM_USE_AITER=1
+```
+
+在总开关开启时，下列子开关常用于细粒度裁剪（默认值随版本变化，以 **vLLM** 文档为准）：
+
+| 环境变量 | 作用 |
+|----------|------|
+| `VLLM_ROCM_USE_AITER_LINEAR` | **Linear** 层 **FP8** 量化 **GEMM** |
+| `VLLM_ROCM_USE_AITER_MOE` | 融合 **MoE** 路由与计算 |
+| `VLLM_ROCM_USE_AITER_RMSNORM` | **RMSNorm** 加速 |
+| `VLLM_ROCM_USE_AITER_MLA` | **MLA**（**DeepSeek** 等） |
+| `VLLM_ROCM_USE_AITER_MHA` | **MHA**（**Llama/Mistral** 等） |
+| `VLLM_ROCM_USE_AITER_FP8BMM` | **MLA** 用 **FP8** **batched matmul** |
+| `VLLM_ROCM_USE_SKINNY_GEMM` | 小 **batch** **skinny GEMM** |
+
+**DeepSeek MLA** 使用 **vLLM** 时常需 **`--block-size 1`**，否则可能报错。
+
+### Disaggregated serving（Prefill / Decode 分离）
+
+**SGLang** 支持 **PD disaggregation**，将 **prefill** 与 **decode** 分到不同进程/**GPU**。典型 **launch_server** 相关参数包括：
+
+| 参数 | 含义 |
+|------|------|
+| `--disaggregation-mode` | `prefill` 或 `decode` |
+| `--disaggregation-transfer-backend` | **KV** 传输后端（如 **mooncake**、**nixl**） |
+| `--disaggregation-ib-device` | **InfiniBand** / **RoCE** 设备名 |
+| `--disaggregation-bootstrap-port` | **Bootstrap** 端口（爬取默认 **8998**） |
+| `--base-gpu-id` | 多卡上起始 **GPU** 索引（**decode** 侧常用） |
+| `--model-path` | 模型路径（两侧均需） |
+| `--port` / `--host` | 服务监听地址与端口 |
+
+前端常配合 **`python -m sglang_router.launch_router --pd-disaggregation --prefill ... --decode ...`**。细粒度线程与超时见 **`SGLANG_DISAGGREGATION_*`** 等环境变量（**thread pool**、**queue**、**heartbeat** 等）。
+
+## 9. 与 CK 文档的衔接
 
 - **CK tile / pipeline / GemmConfig\*** 细节：[[ck-tile-tuning.md|ck-tile-tuning]]、[[ck-programming-model.md|ck-programming-model]]
 - AITER 中大量 GEMM / FMHA 仍依赖 **CK** 实现；阅读 **ck_tile** 有助于理解 **调参边界与瓶颈类型**。

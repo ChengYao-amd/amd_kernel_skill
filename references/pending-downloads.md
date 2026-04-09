@@ -54,10 +54,23 @@ wget -O cdna2-isa.pdf "https://www.amd.com/system/files/TechDocs/instinct-mi200-
 wget -O cdna2-whitepaper.pdf "https://www.amd.com/content/dam/amd/en/documents/instinct-business-docs/white-papers/amd-cdna2-white-paper.pdf"
 ```
 
-## 下载后阅读优先级
+## 已下载并阅读 ✅
 
-1. **cdna4-isa.pdf** → 补充 `references/isa/mfma-instructions.md`（CDNA4 完整 MFMA 指令 + 寄存器布局）
-2. **cdna4-whitepaper.pdf** → 补充 `references/hardware/mi355x.md`（微架构细节、cache hierarchy、Infinity Fabric）
-3. **cdna3-isa.pdf** → 校验 `references/isa/` 全部文档中的指令延迟、编码格式
-4. **mi355x-brochure.pdf** → 确认 MI355X 峰值性能数字
-5. **cdna3-whitepaper.pdf** → 补充 MI300X XCD 内部结构、DME 细节
+以下 PDF 已下载到 `rocm-related-pdf/` 并已蒸馏到知识库：
+- ✅ `cdna4-whitepaper.pdf` — CDNA4 架构白皮书（21 页完整阅读）
+- ✅ `cdna3-whitepaper.pdf` — CDNA3 架构白皮书（28 页完整阅读）
+- ✅ `cdna4-isa.pdf` — CDNA4 ISA（部分章节）
+- ✅ `cdna3-isa.pdf` — CDNA3 ISA（部分章节）
+- ✅ `mi355x-brochure.pdf` — MI355X GPU 手册
+- ✅ `mi355x-platform-brochure.pdf` — MI355X 平台手册
+- ✅ `mi300x-datasheet.pdf` — MI300X 数据表
+- ✅ `cdna2-isa.pdf` — CDNA2 ISA 参考
+- ✅ `cdna2-whitepaper.pdf` — CDNA2 白皮书
+
+## 后续可补充的 PDF（非必需，按需下载）
+
+| 文件名 | 链接 | 说明 |
+|--------|------|------|
+| `mi350x-datasheet.pdf` | https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/data-sheets/amd-instinct-mi350x-platform-data-sheet.pdf | MI350X 平台数据表 |
+| `mi300a-datasheet.pdf` | https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/data-sheets/amd-instinct-mi300a-data-sheet.pdf | MI300A APU 数据表 |
+| `ocp-mx-spec.pdf` | https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf | OCP Microscaling (MX) 规范 — MXFP4/MXFP6/MXFP8 格式定义 |

@@ -56,9 +56,11 @@ When stuck or optimizing, `grep`/`glob` these knowledge base files:
 - `references/triton-rocm-quirks.md` — AMD Triton passes, matrix_instr_nonkdim, max-autotune, FP8 types
 
 **Layer 4 — Libraries & API** (read when using library kernels):
+- `references/gemm-tuning-guide.md` — GEMM 三级调优全景（TunableOp→hipBLASLt→TensileLite）+ Attention 选型
+- `references/rccl-multi-gpu-guide.md` — 多 GPU 通信（RCCL、Quick Reduce、CPX 配置）
 - `references/ck-programming-model.md` — CK-Tile pipeline hierarchy, partitioners, schedulers
 - `references/ck-tile-tuning.md` — Real GemmConfig tile sizes, FMHA configs, pipeline selection
-- `references/aiter-ops-reference.md` — AITER complete API (12 categories), FP8 arch awareness, tuning
+- `references/aiter-ops-reference.md` — AITER complete API (12 categories), per-op speedups, serving integration
 - `references/hip-intrinsics.md` — MFMA intrinsics, FP8 HIP types, cross-lane ops, math builtins
 
 **Layer 5 — Optimization Patterns** (read when iterating):

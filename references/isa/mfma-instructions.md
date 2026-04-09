@@ -94,6 +94,47 @@ __builtin_amdgcn_mfma_scale_f32_32x32x64_f8f6f4(
 - **Atype / Btype**：标明 A、B 的低比特格式（如 FP8/FP6/FP4 组合）。
 - **OPSEL_*** 与 **scale_***：用于操作数位选择与 per-block 或 per-element scale 路径（与 **MXFP*** 块缩放语义配合）；具体枚举与合法组合以 **ROCm/LLVM 发布说明** 为准。
 
+## AMD Matrix Instruction Calculator（工具）
+
+**AMD Matrix Instruction Calculator**（仓库 **ROCm/amd_matrix_instruction_calculator**）为命令行/Python 工具，用于查询 **MFMA** / **WMMA** 等矩阵指令的编码、寄存器映射与吞吐信息。`--architecture` 可指定 **CDNA2/gfx90a**、**CDNA3/gfx942**、**RDNA4/gfx1201** 等别名。
+
+### 五种查询模式
+
+| 选项 | 作用 |
+|------|------|
+| `--detail-instruction`（`-d`） | 打印指令编码、寄存器用量、计算吞吐量、是否与 **VALU** **co-execute** |
+| `--get-register`（`-g`） | 给定矩阵坐标 → 输出 **vector register**、**lane**、**bit range** |
+| `--matrix-entry`（`-m`） | 给定 **register** + **lane** → 反查矩阵坐标 |
+| `--register-layout`（`-R`） | 打印整块矩阵的 **register/lane** 映射表 |
+| `--matrix-layout`（`-M`） | 打印所有 **register/lane** 对应的矩阵元素 |
+
+### CBSZ / ABID / BLGP 修饰符语义
+
+经典 **MFMA** **intrinsic** 末尾三个整数参数与 **VOP3P-MAI** 编码字段对应：
+
+| 字段 | 含义 |
+|------|------|
+| **CBSZ**（**Control Broadcast Size**） | 控制 **A** 矩阵 **block** 广播粒度；合法范围为 `0 .. log2(blocks)` |
+| **ABID**（**A-matrix Broadcast Identifier**） | 在 **CBSZ** 定义的广播方案下，选择参与运算的 **A** 的 **block**，范围为 `0 .. 2^CBSZ-1` |
+| **BLGP**（**B-matrix Lane Group Pattern**） | **B** 矩阵在 **lane** 间的 **swizzle** / **broadcast** 模式（**CDNA2** 上常见：`0` 正常；`1`/`2` 为半 **wave** 间广播；`3` 为 **lane** 数据移位；`4–7` 为 **16-lane group** 广播模式等，具体以目标架构 **ISA** 为准） |
+
+另：**OPSEL**、**NEG** / **NEG_HI** 等用于 **16-bit** 在 **32-bit** 寄存器内的半字选择与符号控制，见工具与 **ISA** 手册。
+
+### 寄存器输出格式 `Vx{y}.z`
+
+工具与文档中常见 **`Vx{y}.z`** 记号：
+
+- **`x`**：**register** 偏移或编号。
+- **`y`**：**lane** 索引（**wave64** 下为 `0–63`）。
+- **`.z`**：该 **lane** 上寄存器内的 **bit** 区间（如 `[15:0]`、`[31:16]`、`[7:0]`），用于 unpacked 元素或子字。
+
+## rocWMMA fragment 与 MFMA 的关系
+
+**rocWMMA** 在 **wavefront** 粒度提供 **`fragment`** 抽象：**load_matrix_sync** / **mma_sync** / **store_matrix_sync** 将 **DRAM/LDS** 数据与 **MFMA** 使用的寄存器布局衔接。模板参数包括 **FragM/N/K**、**DataT**、**DataLayout**、**Scheduler** 等。
+
+- **fragment** 内部为 **packed** 寄存器存储，元素顺序未必直观，需按文档做 **layout** 与 **scheduler**（如 **default_schedule**、**coop_row_major_2d** 等）配对使用。
+- **mma_sync** 在 **CDNA** 上最终下发 **MFMA**（或架构允许的矩阵指令）；**WMMA** 则对应 **RDNA** 路径。手写 **intrinsic** 时直接控制 **MFMA** 与 **modifier**；**rocWMMA** 则通过 **fragment** 隐藏大部分 **lane–矩阵** 映射细节，但仍需保证整 **wave** 活跃，否则行为未定义。
+
 ## FP8 与低精度格式：CDNA3 vs CDNA4
 
 | 项目 | CDNA3（GFX942） | CDNA4（GFX950） |
