@@ -1,0 +1,12 @@
+[submodule "vendor/composable_kernel"]
+	path = vendor/composable_kernel
+	url = https://github.com/ROCm/composable_kernel.git
+[submodule "vendor/rocm-examples"]
+	path = vendor/rocm-examples
+	url = https://github.com/amd/rocm-examples.git
+[submodule "vendor/aiter"]
+	path = vendor/aiter
+	url = https://github.com/ROCm/aiter.git
+[submodule "vendor/triton"]
+	path = vendor/triton
+	url = https://github.com/ROCm/triton.git
