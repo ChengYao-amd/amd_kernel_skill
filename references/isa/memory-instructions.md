@@ -21,10 +21,23 @@
 | ds_write_b32/b64/b128 | 4-16B | 同样宽度 |
 | ds_swizzle_b32 | 4B | 无 LDS 读写的 lane 排列 |
 
-**Bank 数量（代际差异）**：
+**Bank 数量与容量、读带宽（代际差异，CDNA3/4 白皮书）**：
+
+| 项目 | CDNA3 | CDNA4 |
+|------|-------|-------|
+| LDS 容量/CU | 约为 CDNA4 的 **一半**（相对 CDNA4 **160 KB/CU**） | **160 KB/CU** |
+| Bank 数 | **32** | **64**（相对 CDNA3 **翻倍**） |
+| LDS 读带宽 | **128 B/clock**（约为 CDNA4 一半） | **256 B/clock**（容量与读带宽相对 CDNA3 均为约 **2×**） |
 
 - **CDNA3（如 MI300X / gfx942）**：**32-bank LDS**，每 bank **4B**。
-- **CDNA4（如 MI355X / gfx950）**：**64-bank LDS**（相对 CDNA3 **翻倍**）。**Bank conflict 模式与 padding 计算与 CDNA3 不同**，勿沿用 32-bank 假设下的固定 padding；迁移到 CDNA4 时需按 **64 bank** 重新推导 swizzle / pad。
+- **CDNA4（如 MI355X / gfx950）**：**64-bank LDS**。**Bank conflict 模式与 padding 计算与 CDNA3 不同**，勿沿用 32-bank 假设下的固定 padding；迁移到 CDNA4 时需按 **64 bank** 重新推导 swizzle / pad。
+- **Direct LDS load（CDNA4 新路径）**：CDNA4 上 LDS 可经 **direct load** 从 **L1 data cache** 直接装填，减少经向量路径迂回的访存开销；调优时可与 MFMA、软件流水及 `buffer_load_lds` / DME 路径对照 profiling。
+
+**L1 / L2 缓存（CDNA3 与 CDNA4 一致处及带宽口径）**：
+
+- **L1（data）**：**32 KB**，**128 B** cache line，**64-way** 组相联（CDNA3 / CDNA4 相同）。
+- **L2（每 XCD）**：**4 MB**，**16-way**，**16 channels**；每 channel 每周期 **读 128 B、写 64 B**；**每 XCD L2 读带宽约 2 KB/clock**。
+- **L2 聚合读带宽（8 XCD 规模）**：CDNA3 约 **34.4 TB/s**；CDNA4 约 **32 TB/s**（代际间以白皮书标称为准，实际随产品与配置变化）。
 
 **Bank conflict 规则**：同一周期内多个 lane 命中同一 bank 的不同 word → conflict → 串行化。通过 **padding**、**swizzle** 或访问模式重排缓解。
 

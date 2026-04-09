@@ -16,15 +16,18 @@
 |------|------|------|
 | 假设 warp = 32 | 错误的 reduction 结果、性能退化 | AMD wavefront = 64。使用 6 步 shuffle，不是 5 步 |
 | **假设 MI300X 有 192 CU** | Grid 大小不足，GPU 利用率低 | MI300X/MI325X 实际有 **304 CU**（38/XCD × 8 XCDs）|
-| 假设 shared mem = 48KB | LDS 溢出或 occupancy 错误计算 | MI300X LDS = **64 KB/CU**；MI355X = **160 KB/CU** |
+| 假设 shared mem = 48KB | LDS 溢出或 occupancy 错误计算 | CDNA4 **160 KB/CU**；CDNA3 容量与读带宽约为 CDNA4 **一半**（见 `isa/memory-instructions.md`）；勿用 NVIDIA 48KB 默认值 |
 | 使用 `__syncwarp()` | 不必要的同步 | AMD wavefront 是锁步的，无需部分同步 |
 | 错误的 bank conflict 计算 | 意外的 LDS 争用 | **CDNA3**：32 bank × 4B；**CDNA4**：**64 bank**（与 CDNA3 不同，padding 需重算）；conflict pattern 与 NVIDIA 不同 |
 | HIP 中滥用 **flat load**、忽略 **buffer ops** | VMEM 压力大、低于最优带宽 | 在可用场景优先 **`buffer_load_*` / buffer ops**（编译器或手写 ISA），勿假设 flat 与 buffer 等价最优 |
 | CDNA4 上仍按 **32-bank LDS** 做 padding | 隐性 bank conflict、性能不达预期 | CDNA4 为 **64-bank LDS**，按 `isa/memory-instructions.md` 更新 swizzle / pad |
-| 有 **structured sparsity** 能力却全程 dense | 未吃满有效吞吐 | CDNA4 官方标称含 **structured sparsity** 翻倍有效吞吐；算子/库支持时评估开启并做精度验证 |
+| 有 **structured sparsity** 能力却全程 dense | 未吃满有效吞吐 | 当输入在 **每 4 元一组** 中 **零占比 ≥ 50%** 时，硬件上可 **翻倍** 有效吞吐；算子/库支持时评估开启并做精度验证（见 `advanced-optimization.md`） |
 | 未使用 **`__builtin_amdgcn_s_setprio`** 等 wave 调度手段 | ping-pong / 多 wave 重叠不足 | 高阶 GEMM（见 `advanced-optimization.md`）中配合 **`sched_barrier`**、`buffer_load_lds` 做 wave 级编排 |
 | FP8 精度格式搞混 | 数值结果错误 | CDNA3 用 E4M3**FNUZ**/E5M2**FNUZ**；CDNA4 用 E4M3**FN**(OCP)/E5M2(OCP)，exponent bias 不同 |
 | 忽略 XCD（多 die）拓扑 | L2 cache miss 率异常高 | MI300X 有 8 个 XCD，每个 XCD 有自己的 L2 (4MB)；跨 XCD 访问走 L3 |
+| **假定 CDNA4 上仍有 TF32 硬件矩阵路径** | 性能/数值预期与 NVIDIA 混淆 | CDNA4 **无 TF32 Matrix 硬件**；需用 **BF16** 等路径 **软件模拟**，并对精度与吞吐重估（见 `isa/mfma-instructions.md`） |
+| **把 CDNA3 的 partition 模式原样套到 CDNA4** | 拓扑/NPS 行为与预期不符 | CDNA4 引入 **QPX**，且 **仅支持 NPS1 / NPS2**，**无 NPS4**；迁移前对照平台文档重新选 partition |
+| **忽略 CDNA4 Matrix FP64 降速** | HPC 双精度 GEMM 或隐式 FP64 远低于 CDNA3 经验值 | CDNA4 **Matrix FP64** 为 **128 FLOPS/clock/CU**（相对 CDNA3 **256** **减半**）；热点需重评算法、精度或是否改走非矩阵 FP64 路径 |
 
 ## 性能
 

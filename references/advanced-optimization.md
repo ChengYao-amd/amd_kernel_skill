@@ -15,7 +15,8 @@
 
 **AMD 实现要点**：
 - 需要精确的 `s_waitcnt lgkmcnt/vmcnt`（参见 `isa/scheduling-pipeline.md`）
-- LDS 缓冲：检查每 CU **LDS 容量**上限（如 MI300X 为 64 KiB/CU，MI355X 为 160 KiB/CU）
+- LDS 缓冲：核对每 CU **LDS 容量与读带宽**（CDNA4 白皮书：**160 KiB/CU**、**256 B/clock** 读带宽；相对 CDNA3 容量与读带宽约 **2×**；详见 `isa/memory-instructions.md`）
+- **CDNA4**：存在 **LDS 自 L1 data cache 的 direct load** 路径，可将热数据尽量留在 **L1→LDS** 链路上，减轻与全局路径的争抢；与 double buffering、异步搬运一起 profile。
 - 示例：当前 MFMA 执行时预取下一个 tile
 
 **预期收益**：内存受限 kernel 通常 10-30%
@@ -88,8 +89,10 @@
 - 利用 MFMA 的混合精度能力（FP16 输入、FP32 输出）
 
 **AMD 实现要点**：
-- 查阅 `isa/mfma-instructions.md` 了解可用精度组合
-- MI355X/CDNA4 可能新增精度格式 — 查阅对应硬件文档
+- 查阅 `isa/mfma-instructions.md` 了解可用精度组合与 **每 CU FLOPS/clock**（CDNA4 上 FP16/FP8/MX 等相对 CDNA3 提升，**Matrix FP64 减半**）
+- MI355X/CDNA4 新增 **MXFP6/MXFP4** 等格式 — 以硬件文档与 ROCm 发布说明为准
+- **超越函数（transcendental）吞吐**：CDNA4 上相关指令有效速率相对 CDNA3 约 **2×**，**softmax**、激活等含 **exp/log** 的片段更易成为算子内可优化热点
+- **Structured sparsity**：当输入在 **每 4 个元素一组** 中 **零元素比例 ≥ 50%** 时，硬件路径上可 **翻倍** 有效吞吐（需算子/库支持与精度验证）
 
 **预期收益**：计算受限 kernel 可获 10-30% TFLOPS 提升
 
