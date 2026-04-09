@@ -24,6 +24,13 @@ Detect the programming path and read the corresponding sub-skill:
 | User specifies path | Read corresponding sub-skill |
 | Unclear | Ask user which path to use |
 
+## Step 2: Check Existing Optimized Implementations
+
+Before writing a custom kernel, check if an optimized version already exists:
+1. Read `references/libraries/aiter-ops-reference.md` — AITER has 12 categories of production-tuned ops
+2. Read `references/libraries/gemm-tuning-guide.md` — for GEMM, library tuning often beats custom kernels
+3. Only write custom kernel if: AITER doesn't cover the op, or AITER performance is insufficient
+
 ## Constraints (Always Apply)
 
 1. **Correctness first**: Never sacrifice correctness for performance
@@ -33,39 +40,81 @@ Detect the programming path and read the corresponding sub-skill:
 5. **Persistence on failure**: At least 3 retry attempts before abandoning a direction
 6. **Knowledge accumulation**: Success → design doc; Failure → postmortem; both backfill `references/`
 
-## Available References (5-Layer Knowledge Base)
+## Knowledge Base — 5-Layer Reference Architecture
 
-When stuck or optimizing, `grep`/`glob` these knowledge base files:
+The knowledge base is organized into 5 layers, each corresponding to a stage of kernel optimization. Read layer by layer as you progress through the optimization flow.
 
-**Layer 1 — Hardware Architecture** (read at Step 0):
-- `references/hardware/mi300x.md` — MI300X/MI325X specs, partition modes (SPX/DPX/CPX), XCD topology
-- `references/hardware/mi355x.md` — MI355X/MI350X specs, 8 TB/s BW, structured sparsity, FP4/FP6
-- `references/hardware/hardware-comparison.md` — Cross-hardware comparison and porting checklist
+### Layer 1 — Hardware Architecture (`references/hardware/`)
 
-**Layer 2 — ISA Instructions** (read when optimizing hot loops):
-- `references/isa/mfma-instructions.md` — Complete MFMA table (CDNA3+CDNA4), compiler intrinsics, data layout
-- `references/isa/memory-instructions.md` — Global/LDS/buffer ops, s_waitcnt, DME async transfer
-- `references/isa/register-allocation.md` — VGPR budget vs occupancy table, AGPR, spill detection
-- `references/isa/scheduling-pipeline.md` — ILP, dual-issue, MFMA scheduling
-- `references/isa/inline-asm-patterns.md` — Builtin→ISA mapping, s_setprio, sched_barrier
+Read at **Step 0** to understand target hardware constraints.
 
-**Layer 3 — Toolchain** (read when profiling or debugging):
-- `references/rocprof-guide.md` — rocprofv3, hardware counters, Perfetto visualization
-- `references/omniperf-guide.md` — ROCm Compute Profiler, roofline analysis, Speed-of-Light
-- `references/hipcc-compilation.md` — Compilation flags, -save-temps, PyTorch extension build
-- `references/triton-rocm-quirks.md` — AMD Triton passes, matrix_instr_nonkdim, max-autotune, FP8 types
+| File | Content | When to Read |
+|------|---------|-------------|
+| `hardware/mi300x.md` | MI300X/MI325X: 304 CU, 8 XCD (38 active/die), 5.3 TB/s HBM3, LDS 64KB/CU, 4MB L2/XCD, partition modes (SPX/DPX/CPX), FLOPS/clock/CU table | Target is gfx942 |
+| `hardware/mi355x.md` | MI355X/MI350X: 256 CU, 8 XCD (32 active/die), 8 TB/s HBM3E, **LDS 160KB/CU (64-bank)**, QPX partition, structured sparsity, FP4/FP6, MFMA throughput doubled | Target is gfx950 |
+| `hardware/hardware-comparison.md` | CDNA3 vs CDNA4 full comparison: XCD layout, IOD count, Fabric speed, Matrix Core throughput, partition modes, FP8 format differences | Porting across hardware |
 
-**Layer 4 — Libraries & API** (read when using library kernels):
-- `references/gemm-tuning-guide.md` — GEMM 三级调优全景（TunableOp→hipBLASLt→TensileLite）+ Attention 选型
-- `references/rccl-multi-gpu-guide.md` — 多 GPU 通信（RCCL、Quick Reduce、CPX 配置）
-- `references/ck-programming-model.md` — CK-Tile pipeline hierarchy, partitioners, schedulers
-- `references/ck-tile-tuning.md` — Real GemmConfig tile sizes, FMHA configs, pipeline selection
-- `references/aiter-ops-reference.md` — AITER complete API (12 categories), per-op speedups, serving integration
-- `references/hip-intrinsics.md` — MFMA intrinsics, FP8 HIP types, cross-lane ops, math builtins
+### Layer 2 — ISA & Instruction Level (`references/isa/`)
 
-**Layer 5 — Optimization Patterns** (read when iterating):
-- `references/optimization-patterns.md` — Early/mid-stage: coalescing, tiling, fusion, grid sizing
-- `references/advanced-optimization.md` — Late-stage: software pipelining, wavefront specialization, FP8 GEMM progression
-- `references/common-mistakes.md` — AMD-specific pitfalls (304 CU not 192, 64-bank LDS on CDNA4, FP8 format mismatch)
-- `references/kernel-recipes.md` — RMSNorm, SwiGLU, reduction reference implementations
-- `references/amd-vs-nvidia-cheatsheet.md` — CUDA→HIP migration checklist
+Read when **optimizing hot loops** and making ISA-level decisions.
+
+| File | Content | When to Read |
+|------|---------|-------------|
+| `isa/mfma-instructions.md` | **Complete MFMA instruction table** (CDNA3+CDNA4), compiler intrinsics format, FLOPS/clock/CU, FP8 FNUZ vs OCP, data layout, Matrix Instruction Calculator, CBSZ/ABID/BLGP modifiers, rocWMMA fragment mapping | Writing MFMA kernel or choosing instruction variant |
+| `isa/memory-instructions.md` | Global/LDS/buffer ops, **s_waitcnt semantics** (vmcnt/lgkmcnt/expcnt), LDS bank rules (32-bank CDNA3 vs 64-bank CDNA4), **DME async transfer**, **buffer_load_lds** (global→LDS direct), L1/L2 bandwidth numbers | Optimizing memory access patterns |
+| `isa/register-allocation.md` | **VGPR budget vs occupancy table**, SGPR budget, AGPR for MFMA accumulators, spill detection (`-save-temps`, `.vgpr_count`), occupancy vs ILP tradeoff decision flow, MI300X/MI355X practical thresholds | Kernel has register pressure or low occupancy |
+| `isa/scheduling-pipeline.md` | ILP strategy, dual-issue rules (VALU+SALU), MFMA scheduling (64-cycle overlap), **CDNA4 MFMA dependency resolution table (ISA Table 38)** — exact NOP counts for all instruction pairs, s_waitcnt strategy | Scheduling MFMA with loads, eliminating pipeline bubbles |
+| `isa/valu-salu-instructions.md` | VALU/SALU throughput, FP16 packed ops, transcendental rates (4x slower, 2x faster on CDNA4), type conversion | Instruction mix optimization |
+| `isa/inline-asm-patterns.md` | `__builtin_amdgcn_*` → ISA mapping, **s_setprio** (wave priority 0-3), **sched_barrier** (0x008=MFMA, 0x004=SALU), **sched_group_barrier**, **buffer_load_lds** asm pattern, architecture-adaptive waitcnt | Implementing 8-wave ping-pong, manual scheduling, extreme optimization |
+| `isa/isa-overview.md` | ISA 速查入口: register files (512 KiB VGPR/CU), instruction categories, pipeline model, when to dive into which ISA doc | First time entering ISA-level optimization |
+
+### Layer 3 — Toolchain (`references/toolchain/`)
+
+Read when **profiling, debugging, or compiling**.
+
+| File | Content | When to Read |
+|------|---------|-------------|
+| `toolchain/profiling-decision-tree.md` | **Mechanical profiling→action guide**: Speed-of-Light → memory/compute/stall classification → per-bottleneck counter checks → concrete fix actions, with Mermaid flow chart, CDNA3 vs CDNA4 thresholds, counter formulas | **Every profiling iteration** — follow this step by step |
+| `toolchain/rocprof-guide.md` | rocprofv3 usage, hardware counter collection, `counters.txt` format, MI300X key counters (SQ_WAVES, SQ_INSTS_MFMA, TCC_HIT/MISS), Perfetto timeline visualization | Collecting raw counter data |
+| `toolchain/omniperf-guide.md` | ROCm Compute Profiler (formerly omniperf): `rocprof-compute profile/analyze`, roofline analysis, Speed-of-Light panel, bottleneck decision tree, metric sets | High-level automated analysis |
+| `toolchain/hipcc-compilation.md` | `hipcc -O3 --offload-arch=gfx942`, multi-target build, `-save-temps` for ISA inspection, PyTorch extension build, common errors & fixes, `-ffast-math`, `-munsafe-fp-atomics` | Compilation errors or inspecting generated ISA |
+| `toolchain/triton-rocm-quirks.md` | AMD Triton compiler passes (AccelerateMatmul, BlockPingpong, ConvertToBufferOps, StreamPipeline), `matrix_instr_nonkdim`, `TORCHINDUCTOR_MAX_AUTOTUNE`, `TORCH_COMPILE_DEBUG=1`, FP8 type per-arch, `MLIR_ENABLE_DUMP=1` | Debugging Triton on AMD, tuning autotune config space |
+
+### Layer 4 — Libraries & API (`references/libraries/`)
+
+Read when **choosing or configuring library kernels**.
+
+| File | Content | When to Read |
+|------|---------|-------------|
+| `libraries/gemm-tuning-guide.md` | **GEMM 三级调优**: Pre-tuned Docker → PyTorch TunableOp → hipBLASLt/rocBLAS → TensileLite custom kernel; hipBLASLt API workflow; Stream-K; online tuning; **Attention kernel 选型**: AITER asm > CK FMHA > Triton FA > FlashInfer | Any GEMM or Attention optimization task |
+| `libraries/aiter-ops-reference.md` | AITER 12-category API (MHA, GEMM, PA, Norm, MoE, Quant, RoPE, etc.), **per-op speedup** (MLA 17x, MoE 3x), FP8 arch awareness (gfx950=OCP, others=FNUZ), vLLM/SGLang integration flags, disaggregated serving | Checking if AITER already has optimized version |
+| `libraries/ck-programming-model.md` | CK-Tile pipeline hierarchy: `TileGemmShape → Partitioner → Traits → Pipeline → Kernel`, 7 pipeline types (MEMORY/COMPUTE_V3-V6/ASYNC/PRESHUFFLE), 3 schedulers (Default/Intrawave/Interwave), 3 partitioners (2D/1D/SpatiallyLocal+RemapXCD) | Configuring or extending CK kernels |
+| `libraries/ck-tile-tuning.md` | **Real GemmConfig tables** from CK codebase: block/warp tile sizes for 10+ configurations, FMHA tuning (hdim 64/128), pipeline selection guide (workload→pipeline→scheduler), LDS/VGPR/grid check rules | Choosing tile sizes for CK |
+| `libraries/hip-intrinsics.md` | **MFMA compiler intrinsics** full format, CDNA3+CDNA4 intrinsic names, **FP8 HIP types** (`__hip_fp8_storage_t`, `fp8x8_t` vectors), **block-scaled MFMA** intrinsic (Atype/Btype encoding), cross-lane ops, math intrinsics, AMD vs NVIDIA intrinsic mapping | Writing HIP kernel with MFMA or FP8 |
+| `libraries/rccl-multi-gpu-guide.md` | RCCL config (12+ env vars), MSCCL++ integration, Quick Reduce (INT8/INT6/INT4 quantized all-reduce), CPX+NPS4 setup, MI300X 8-GPU xGMI topology, communication/compute overlap | Multi-GPU optimization |
+
+### Layer 5 — Optimization Patterns & Recipes (`references/optimization/`)
+
+Read when **iterating on kernel performance**.
+
+| File | Content | When to Read |
+|------|---------|-------------|
+| `optimization/optimization-patterns.md` | **Early/mid-stage** patterns: coalesced access, vectorized loads, LDS tiling, kernel fusion, loop unrolling, grid sizing (≥304 blocks for MI300X), thread block sizing, MIOpen Find/Immediate, MXFP4/Quark quantization | Starting optimization, first 2-3 rounds |
+| `optimization/advanced-optimization.md` | **Late-stage** (plateau-breaking): software pipelining + double buffer, wavefront specialization, LDS swizzle (XOR formula), occupancy vs ILP, persistent kernel, mixed precision, compiler guidance, L2 cache optimization, **FP8 GEMM 1→2600 TFLOPS progression**, structured sparsity, direct LDS load from L1 | Performance plateaus after basic optimization |
+| `optimization/kernel-recipes.md` | **SOTA code examples**: FP8 GEMM with MFMA (fp8x16 vectorized, double buffer, ~2288 TFLOPS), buffer_load_lds (global→LDS direct), LDS XOR swizzle, **8-wave ping-pong** (s_setprio + sched_barrier), RMSNorm (AITER Triton persistent), Fused MoE (XCD remap + SiLU fusion), wavefront-aware reduction | Need working code pattern to reference |
+| `optimization/common-mistakes.md` | AMD-specific pitfalls: MI300X has **304 CU** (not 192), CDNA4 LDS **64-bank** (not 32), FP8 **FNUZ vs OCP** mismatch, TF32 removed from CDNA4, CDNA4 Matrix FP64 halved, QPX/NPS differences, missing `-O3`, buffer ops vs flat, `s_setprio` for scheduling | Before submitting kernel, review this checklist |
+| `optimization/amd-vs-nvidia-cheatsheet.md` | CUDA→HIP migration: terminology (warp→wavefront, SM→CU, shared→LDS), API mapping, behavioral differences (warp 32→64, reduction 5→6 steps, no `__syncwarp` needed), migration checklist | Porting CUDA kernel to HIP |
+
+### Raw Research Data (`references/crawl-data/`)
+
+Detailed crawl reports for deep-dive reference. Not needed for routine optimization — consult when the structured docs above don't cover your specific question.
+
+| File | Content |
+|------|---------|
+| `crawl-data/README.md` | Index of all 143+ crawled pages with categorization |
+| `crawl-data/extracted_sota_patterns.md` | 909 lines of production code extracted from CK, AITER, FP8 GEMM blog |
+| `crawl-data/p0_isa_mfma_lowlevel.md` | ISA/MFMA encoding, Matrix Calculator, rocWMMA, performance counters |
+| `crawl-data/p1_gemm_attention_tuning.md` | hipBLASLt, rocBLAS, Flash Attention variants, Stream-K, Triton |
+| `crawl-data/p2_system_optimization.md` | RCCL, MIOpen, MXFP4, FP8 GEMM progression, DeepSeek, ROCm 7.12 |
+| `crawl-data/p3_deep_dive_cases.md` | DeepSeek, Kimi/FlyDSL, GEAK agent, MI355X training benchmarks |
+| `crawl-data/rocm_crawl_report_round{1,2,3}.md` | Round 1-3 raw crawl data (103+ pages total) |

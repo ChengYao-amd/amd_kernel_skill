@@ -11,7 +11,7 @@ Understand current CK template configuration and identify tuning opportunities.
 
 ## Step 2: Implement / Configure Kernel
 
-Refer to `references/ck-programming-model.md` for the CK-Tile pipeline hierarchy:
+Refer to `references/libraries/ck-programming-model.md` for the CK-Tile pipeline hierarchy:
 
 ```
 TileGemmShape → TilePartitioner → TileGemmTraits → GemmPipelineProblem → Pipeline → GemmKernel
@@ -31,7 +31,7 @@ TileGemmShape → TilePartitioner → TileGemmTraits → GemmPipelineProblem →
 | FP4 inference | COMPUTE_ASYNC | Default | Large K_Warp_Tile=128, async |
 | Weight-preshuffle inference | PRESHUFFLE_V2 | Default | Pre-shuffled weights for decode/prefill |
 
-Key tuning parameters: `M_Tile`, `N_Tile`, `K_Tile`, warp layout — consult `references/ck-tile-tuning.md` for real configurations from the CK codebase.
+Key tuning parameters: `M_Tile`, `N_Tile`, `K_Tile`, warp layout — consult `references/libraries/ck-tile-tuning.md` for real configurations from the CK codebase.
 
 For new fused kernels: compose from existing CK primitives rather than writing from scratch.
 For FMHA: hdim 64 and 128 are best tuned, with CppConstraint for CU-aware dispatch.
@@ -49,26 +49,29 @@ Three gates: compile → correctness → performance.
 
 - Each round: save to `agent_output/<OP>/ck/round-N/`
 - Update `performance_trend.md`
-- Tile search strategy: start with recommended configs from `ck-tile-tuning.md`, then grid search ±64 on M/N, ±32 on K
+- Tile search strategy: start with recommended configs from `references/libraries/ck-tile-tuning.md`, then grid search ±64 on M/N, ±32 on K
 - Pipeline switching: if COMPUTE_V3 plateaus, try MEMORY pipeline or COMPUTE_V4 (LDS ping-pong)
 - On failure: retry 3+ times
 - On plateau: try different partitioner (SpatiallyLocal with RemapXCD for MI300X L2 optimization)
-- For FMHA: check `ck-tile-tuning.md` for hdim-specific block sizes from codegen tuning tables
+- For FMHA: check `references/libraries/ck-tile-tuning.md` for hdim-specific block sizes from codegen tuning tables
 - Target: find optimal tile config, assemble new fused kernels
 
 ## Step 5: Knowledge Accumulation
 
-- Success → design doc + backfill optimal configs to `references/ck-tile-tuning.md`
-- Failure → postmortem + backfill to `references/common-mistakes.md`
+- Success → design doc + backfill optimal configs to `references/libraries/ck-tile-tuning.md`
+- Failure → postmortem + backfill to `references/optimization/common-mistakes.md`
 - Mandatory step, never skip
 
 ## Quick Reference: Key Documents
 
 | When | Read |
 |------|------|
-| Understanding CK architecture | `references/ck-programming-model.md` (pipeline hierarchy + API structure) |
-| Choosing tile sizes | `references/ck-tile-tuning.md` (real GemmConfig tables from CK codebase) |
-| MFMA instruction details | `references/isa/mfma-instructions.md` (WarpGemm maps to these) |
-| Hardware-specific tuning | `references/hardware/mi300x.md` or `mi355x.md` (CU count, LDS, L2) |
-| Alternative: AITER | `references/aiter-ops-reference.md` (CK-based ops already production-tuned) |
-| Advanced techniques | `references/advanced-optimization.md` (software pipelining, swizzle) |
+| Every profiling round | `references/toolchain/profiling-decision-tree.md` — mechanical bottleneck classification |
+| Understanding CK architecture | `references/libraries/ck-programming-model.md` — pipeline hierarchy + API |
+| Choosing tile sizes | `references/libraries/ck-tile-tuning.md` — real GemmConfig tables from CK codebase |
+| MFMA instruction details | `references/isa/mfma-instructions.md` — WarpGemm maps to these |
+| Hardware constraints | `references/hardware/mi300x.md` or `mi355x.md` — CU count, LDS, L2 |
+| SOTA code patterns | `references/optimization/kernel-recipes.md` — buffer_load_lds, swizzle, ping-pong |
+| Alternative: AITER | `references/libraries/aiter-ops-reference.md` — production-tuned CK-based ops |
+| Advanced techniques | `references/optimization/advanced-optimization.md` — software pipelining, swizzle |
+| GEMM library tuning | `references/libraries/gemm-tuning-guide.md` — maybe library tuning is better |
