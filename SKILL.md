@@ -24,12 +24,22 @@ Detect the programming path and read the corresponding sub-skill:
 | User specifies path | Read corresponding sub-skill |
 | Unclear | Ask user which path to use |
 
-## Step 2: Check Existing Optimized Implementations
+## Step 2: Study Existing Implementations as Baseline
 
-Before writing a custom kernel, check if an optimized version already exists:
-1. Read `references/libraries/aiter-ops-reference.md` — AITER has 12 categories of production-tuned ops
-2. Read `references/libraries/gemm-tuning-guide.md` — for GEMM, library tuning often beats custom kernels
-3. Only write custom kernel if: AITER doesn't cover the op, or AITER performance is insufficient
+Before writing a kernel, study existing optimized implementations to **establish baseline and identify超越方向**:
+
+1. Read `references/libraries/aiter-ops-reference.md` — check AITER's implementation for the target op
+   - If AITER has it: **benchmark as baseline**, read its source code to understand optimization techniques used
+   - Study which backend it uses (ASM / CK / Triton) and why — this reveals what the experts chose
+2. Read `references/libraries/gemm-tuning-guide.md` — understand the GEMM tuning landscape (hipBLASLt/rocBLAS/TensileLite)
+3. Read `references/optimization/kernel-recipes.md` — check if a SOTA code pattern exists for this op type
+
+**Goal: learn from existing implementations, then surpass them.** Possible超越方向:
+- **Fusion**: AITER ops are single-op; fuse with adjacent ops to eliminate memory round-trips
+- **Precision**: use newer precision (MXFP4/FP6) or mixed-precision pipeline not yet in AITER
+- **Hardware-specific**: exploit CDNA4 features (160KB LDS, 64-bank, direct L1→LDS load) if AITER targets CDNA3
+- **Workload-specific**: AITER uses general configs; tune tile/block sizes for your specific shapes
+- **Algorithmic**: apply domain knowledge (e.g., causal mask sparsity, custom attention pattern) that generic kernels can't exploit
 
 ## Constraints (Always Apply)
 
