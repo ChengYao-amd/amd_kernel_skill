@@ -14,8 +14,11 @@
 
 ### 3. LDS Usage
 - Use LDS for data reuse within a thread block
-- Budget: 64KB per CU (shared by all blocks on the CU)
+- Budget per CU (shared by all blocks on the CU):
+  - **CDNA3** (MI300X/MI325X): **64 KB/CU**, **32 banks** x 4B, read bandwidth **128 B/clock**
+  - **CDNA4** (MI350X/MI355X): **160 KB/CU**, **64 banks** x 4B, read bandwidth **256 B/clock** (2x CDNA3); supports **direct load from L1 data cache** (bypasses VGPR, reduces register pressure)
 - More LDS per block -> fewer concurrent blocks -> lower occupancy
+- When migrating CDNA3 -> CDNA4: bank conflict padding/swizzle formulas must be recalculated for 64 banks
 
 ## Compute Optimization
 
@@ -37,7 +40,8 @@
 ## Launch Optimization
 
 ### 7. Grid Size Setting
-- MI300X: 192 CU. Need at least 192 blocks for full utilization
+- **MI300X/MI325X** (CDNA3): **304 CU** (8 XCD x 38 active CU). Need at least 304 blocks for full utilization
+- **MI350X/MI355X** (CDNA4): **256 CU** (8 XCD x 32 active CU). Need at least 256 blocks for full utilization
 - More blocks (2-4x CU count) help hide per-block variance
 - Very small kernels: Consider batching or persistent kernel
 
@@ -51,7 +55,8 @@
 | Anti-Pattern | Impact | Hardware Notes |
 |--------------|--------|----------------|
 | Stride-N access | Bandwidth waste | All AMD GPUs |
-| LDS > 32KB/block | Limited to 2 blocks/CU on MI300X | MI300X: 64KB/CU |
+| LDS > 32KB/block (CDNA3) | Limited to 2 blocks/CU | MI300X: **64KB/CU** (32 banks) |
+| LDS > 80KB/block (CDNA4) | Limited to 2 blocks/CU | MI355X: **160KB/CU** (64 banks); larger tiles possible but re-profile occupancy |
 | Using `__syncthreads` in divergent code | Deadlock risk | All AMD GPUs |
 | Assuming warp=32 | Wrong reduction, wrong shuffle | AMD wavefront=64 |
 

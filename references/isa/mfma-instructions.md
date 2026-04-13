@@ -19,6 +19,9 @@ The following are the **floating-point/integer matrix operation throughput** ach
 | MXFP6 | -- | **16384** |
 | MXFP4 | -- | **16384** |
 | Matrix FP64 | **256** | **128** (halved relative to CDNA3, an architectural trade-off targeting AI workloads) |
+| Matrix MXFP8 | -- | **8192** |
+
+**Whitepaper Table 1 note**: The CDNA4 whitepaper lists MXFP6 and MXFP4 as "16834" FLOPS/clock/CU. This is almost certainly a **typo** for **16384** (= 2^14), which is consistent with the doubling pattern and peak PF calculations. Reference docs use the computed value **16384**.
 
 **Cross-generation note (CDNA4)**:
 
@@ -182,6 +185,36 @@ The following is summarized from official examples and community practice, for u
 - **Register types**: Results typically reside in **VGPR** vector types (e.g., `fp32x4_t`, `fp32x16_t`, depending on tile and backend).
 - **FP8 calling convention**: Operands are commonly **cast to `long`** before passing to intrinsics, to ensure register width and calling convention consistency.
 - **Comparison with NVIDIA MMA**: The lane-to-**(row, col)** mapping rules are different; when performing **layout conversion** or **bitwise comparison with CUTLASS/cuBLAS results**, always use **AMD documentation or llvm-mca / disassembly** as the reference.
+
+## CDNA4: Unified F8F6F4 Instructions
+
+CDNA4 introduces two **unified MFMA instructions** that accept FP8, FP6, and FP4 formats for A and B **independently**:
+
+| Instruction | Tile Shape | Notes |
+|------------|-----------|-------|
+| `V_MFMA_F32_16x16x128_F8F6F4` | 16x16x128 | A/B format selected via CBSZ field |
+| `V_MFMA_F32_32x32x64_F8F6F4` | 32x32x64 | A/B format selected via CBSZ field |
+| `V_MFMA_SCALE_F32_16X16X128_F8F6F4` | 16x16x128 | Scaled variant with per-block E8M0 exponents |
+| `V_MFMA_SCALE_F32_32X32X64_F8F6F4` | 32x32x64 | Scaled variant (MXFP path); requires ABID[0]=1 |
+
+For the `_SCALE_` variants, setting `ABID[0]=0` forces all scales to 1.0 (exponent = 0x7F biased), effectively running unscaled. These instructions are the hardware backing for MXFP8/MXFP6/MXFP4 operations.
+
+## CDNA4: SMFMAC (Sparse MFMA) Instructions
+
+CDNA4 extends the sparse matrix instruction set with larger K dimensions:
+
+| Instruction Family | Tile Shape | Data Types |
+|-------------------|-----------|------------|
+| `V_SMFMAC_F32_16X16X64_{F16,BF16}` | 16x16x64 | FP16/BF16 sparse |
+| `V_SMFMAC_F32_32X32X32_{F16,BF16}` | 32x32x32 | FP16/BF16 sparse |
+| `V_SMFMAC_I32_16X16X128_I8` | 16x16x128 | INT8 sparse |
+| `V_SMFMAC_I32_32X32X64_I8` | 32x32x64 | INT8 sparse |
+| `V_SMFMAC_F32_16x16x128_{FP8,BF8}` | 16x16x128 | FP8/BF8 sparse (all 4 A/B combinations) |
+| `V_SMFMAC_F32_32x32x64_{FP8,BF8}` | 32x32x64 | FP8/BF8 sparse (all 4 A/B combinations) |
+
+**Sparse matrix format**: A is a sparse matrix where 2 out of every 4 consecutive K elements are zero (2:4 structured sparsity). The non-zero values are packed densely, with separate index VGPRs (`SRC2`) encoding which 2 of 4 positions contain data. This enables approximately **2x** effective throughput for qualifying data.
+
+**Key restriction**: SMFMAC instructions interpret `ACC_CD` differently from standard MFMA, and `CBSZ[1:0]`/`ABID[1:0]` fields are ignored for sparsity index instructions.
 
 ## Assembly Layer and INT8 and Other Variants
 

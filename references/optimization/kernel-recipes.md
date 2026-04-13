@@ -76,7 +76,7 @@ int cur = 0, nxt = 1;
 //     if (t + 1 < num_k_tiles)
 //         prefetch_tile_to_lds_async(A_lds[nxt], B_lds[nxt], t + 1);
 //     // fragments from A_lds[cur], B_lds[cur] with swizzle-aware addressing
-//     acc = mfma_fp8(acc, frag_a, frag_b);  // maps to __builtin_amdgcn_mfma_f32_16x16x128_fp8_fp8
+//     acc = mfma_fp8(acc, frag_a, frag_b);  // maps to __builtin_amdgcn_mfma_f32_16x16x128_fp8_fp8 (CDNA4/gfx950 only; CDNA3 uses 16x16x32)
 //     if (t + 1 < num_k_tiles) {
 //         wait_for_global_loads();
 //         block_sync();
@@ -94,6 +94,7 @@ In the inner loop, when the layout satisfies CK/blog post lane mapping, the accu
 using fp8x16 = char __attribute__((vector_size(16)));
 using float4 = float __attribute__((vector_size(16)));
 
+// CDNA4 (gfx950) only — CDNA3 (gfx942) uses __builtin_amdgcn_mfma_f32_16x16x32_fp8_fp8
 __device__ inline float4 mfma_fp8_16x16x128(
     fp8x16 a, fp8x16 b, float4 acc) {
     return __builtin_amdgcn_mfma_f32_16x16x128_fp8_fp8(

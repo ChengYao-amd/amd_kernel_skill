@@ -4,11 +4,14 @@
 
 | Parameter | MI300X (GFX942/CDNA3) | MI325X (GFX942/CDNA3) | MI355X (GFX950/CDNA4) | MI350X (GFX950/CDNA4) |
 |-----------|------------------------|-------------------------|------------------------|------------------------|
-| XCD / CU per die | **40** per XCD (**38** active) | (same as left) | **36** per XCD (**32** active) | (same as left) |
+| Process Node | XCD: TSMC **N5**; IOD: TSMC **N6** | (same as left) | XCD: TSMC **N3P**; IOD: TSMC **N6** | (same as left) |
+| XCD / CU per die | **40** per XCD (**38** active) | (same as left) | **36** per XCD (**32** active); 4 arrays x 9 CU | (same as left) |
 | Active Compute Units (CU) | **304** (8x38) | **304** (same as left) | **256** (8x32) | **256** (same as left) |
-| IOD Count | **4** | **4** | **2** | **2** |
-| VRAM | 192 GiB HBM3 | 256 GiB HBM3E | 288 GiB HBM3E | 288 GiB HBM3E (same tier as MI355X) |
-| HBM Peak Bandwidth (white paper) | Per SKU specifications | **6.0 TB/s** | **8 TB/s** | **8 TB/s** |
+| IOD Count | **4** | **4** | **2** (direct connection, ~**14%** faster than CDNA3) | **2** |
+| Transistor Count | ~153 B | ~153 B | **185 B** | **185 B** |
+| VRAM | 192 GiB HBM3 (**24 GB/stack**) | 256 GiB HBM3E (**32 GB/stack**) | 288 GiB HBM3E (**36 GB/stack**) | 288 GiB HBM3E (**36 GB/stack**) |
+| HBM Data Rate | **5.2 Gbps** | **6.0 Gbps** | **8.0 Gbps** | **8.0 Gbps** |
+| HBM Peak Bandwidth (white paper) | **5.3 TB/s** | **6.0 TB/s** | **8 TB/s** | **8 TB/s** |
 | L2 Aggregate Read Bandwidth | **34.4 TB/s** | **34.4 TB/s** (same architecture) | Per CDNA4 documentation | (same as left) |
 | Infinity Cache Bandwidth | **17.2 TB/s** | **17.2 TB/s** (same architecture) | Per CDNA4 documentation | (same as left) |
 | Wavefront | 64 | 64 | 64 | 64 |
@@ -37,6 +40,8 @@ Note: MI350X and MI355X are both **GFX950 / CDNA4**, with identical CU/XCD, cach
 | P2P / Aggregate (CDNA4) | — | ring **1075.2 GB/s**; aggregate **1203.2 GB/s** (white paper) |
 | Partition: QPX | **None** (commonly SPX / DPX / CPX) | **QPX**: **2** XCD/partition, **4** partitions, approximately **72 GB**/partition |
 | NPS Options | **NPS1 / NPS2 / NPS4**, etc. (platform-dependent) | **NPS1** or **NPS2** (**per-IOD**); commonly recommended **DPX+NPS2** |
+| IOD-to-IOD Bandwidth | Across 4 IODs, multiple hops possible | **2 IODs direct connection**, ~**14%** faster (WP endnote MI350-051) |
+| Efficient Partition Comparison | QPX+NPS4 (CDNA3 baseline) | DPX+NPS2: **7.7x** peak compute, **2.25x** memory capacity, **2.67x** bandwidth vs CDNA3 QPX+NPS4 (WP endnote MI350-052) |
 
 ### FLOPS/clock/CU (Cross-Generation Compute Density)
 
@@ -53,7 +58,29 @@ The table below facilitates **per-CU** intensity comparison; on **MI355X**, **Ma
 | Matrix INT8 / Sparsity | 4096 | **8192** |
 | Matrix MXFP6 / MXFP4 | N/A | **16384** |
 
-**TF32**: CDNA4 has **no** dedicated TF32 hardware unit; requirements are met via **BF16** and other software-level paths (per white paper).
+**TF32**: CDNA4 has **no** dedicated TF32 hardware unit; requirements are met via **BF16** and other software-level paths (per white paper: "moved out of hardware...supported through software emulation utilizing the BF16 datatype").
+
+### LDS Architecture (ISA-Level Detail)
+
+| Item | CDNA3 (ISA) | CDNA4 (ISA) |
+|------|-------------|-------------|
+| Banks | **32** | **64** |
+| Entries per bank | **512** x 4B | **640** x 4B |
+| Capacity / CU | **64 KB** | **160 KB** |
+| Read bandwidth | **128 B/clock** (inferred) | **256 B/clock** (WP: "doubles the read bandwidth") |
+| Integer atomic units | 32 | 32 |
+| L1-to-LDS direct load | No | **Yes** (reduces VGPR pressure; WP p.9) |
+| MFMA Transpose Load | No | **Yes** (`DS_READ_B64_TR_B{16,8,4}`, `DS_READ_B96_TR_B6`) |
+
+### Rack-Scale Reference (Whitepaper)
+
+| Metric | MI350X (AC) | MI355X (DLC) |
+|--------|-------------|--------------|
+| Max GPUs/rack | **64** | **96-128** |
+| Aggregate HBM3E | **18 TB** | **27-36 TB** |
+| Peak OCP-FP8 (w/ sparsity) | **0.59 EF** | **0.97-1.28 EF** |
+| Tray form factor | 6 OU (4 RU tray) | 3 OU (2 RU tray) |
+| Rack power target | 120-130 kW | 200 kW |
 
 ## MI300X vs NVIDIA H100 SXM Comparison
 

@@ -16,7 +16,7 @@
 |---------|---------|-----|
 | Assuming warp = 32 | Wrong reduction results, performance degradation | AMD wavefront = 64. Use 6-step shuffle, not 5-step |
 | **Assuming MI300X has 192 CUs** | Insufficient grid size, low GPU utilization | MI300X/MI325X actually has **304 CUs** (38/XCD x 8 XCDs) |
-| Assuming shared mem = 48KB | LDS overflow or incorrect occupancy calculation | CDNA4 **160 KB/CU**; CDNA3 capacity and read bandwidth are approximately **half** of CDNA4 (see `isa/memory-instructions.md`); do not use the NVIDIA 48KB default |
+| Assuming shared mem = 48KB | LDS overflow or incorrect occupancy calculation | CDNA4 **160 KB/CU** (64 banks x 640 entries x 4B, ISA spec); CDNA3 **64 KB/CU** (32 banks x 512 entries x 4B, ISA spec); read bandwidth **128 B/clock** (CDNA3, inferred from CDNA4 WP "doubles to 256") vs **256 B/clock** (CDNA4, whitepaper p.9); see `isa/memory-instructions.md`; do not use the NVIDIA 48KB default |
 | Using `__syncwarp()` | Unnecessary synchronization | AMD wavefront is lockstep, no partial synchronization needed |
 | Wrong bank conflict calculation | Unexpected LDS contention | **CDNA3**: 32 bank x 4B; **CDNA4**: **64 bank** (different from CDNA3, padding must be recalculated); conflict pattern differs from NVIDIA |
 | Overusing **flat load** in HIP, ignoring **buffer ops** | High VMEM pressure, sub-optimal bandwidth | Prefer **`buffer_load_*` / buffer ops** where applicable (compiler or handwritten ISA); do not assume flat and buffer are equally optimal |

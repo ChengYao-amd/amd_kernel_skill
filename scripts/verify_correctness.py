@@ -62,8 +62,8 @@ def run_verification(kernel_path: str, op: str, dtype_str: str):
     tol = DTYPE_TOLERANCES[dtype_str]
     dtype = DTYPE_MAP.get(dtype_str)
     if dtype is None:
-        print(f"[SKIP] dtype {dtype_str} not supported for torch reference")
-        return True, []
+        print(f"[FAIL] dtype {dtype_str} not supported for torch reference")
+        return False, [f"Unsupported dtype: {dtype_str}"]
 
     module = load_kernel_module(kernel_path)
     kernel_fn = getattr(module, f"kernel_{op}", None) or getattr(module, op, None)
