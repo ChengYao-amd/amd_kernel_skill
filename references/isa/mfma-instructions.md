@@ -1,86 +1,86 @@
-# MFMA（Matrix Fused Multiply-Add）指令参考
+# MFMA (Matrix Fused Multiply-Add) Instruction Reference
 
-本文汇总 **CDNA3（GFX942）** 与 **CDNA4（GFX950）** 上 Matrix Core 的 MFMA 语义、官方披露的 **tile 形状与周期**、**编译器 intrinsic**、**数据布局** 与 **FP8 编码差异**。表格与公式主要依据 AMD ROCm 官方「Matrix Core Programming」系列博文及 LLVM/HIP 公开接口；汇编层助记符形如 `v_mfma_*`，具体编码请以对应 `gfx*` 的 ISA 手册为准。
+This document summarizes the MFMA semantics, officially disclosed **tile shapes and cycle counts**, **compiler intrinsics**, **data layouts**, and **FP8 encoding differences** for Matrix Cores on **CDNA3 (GFX942)** and **CDNA4 (GFX950)**. Tables and formulas are primarily based on AMD ROCm official "Matrix Core Programming" blog series and LLVM/HIP public interfaces; assembly mnemonics take the form `v_mfma_*`, and specific encodings should be verified against the ISA manual for the corresponding `gfx*` target.
 
-## 语义与记号
+## Semantics and Notation
 
-- MFMA 在一条指令内完成 **D ← A×B + C**（矩阵乘加 fused），其中 tile 形状记为 **M×N×K**：A 为 **M×K**，B 为 **K×N**，C/D 为 **M×N**。
-- 下文 **(C,D) ← (A,B)** 表示累加器/结果元素类型与 A、B 元素类型；同一指令内 A、B 类型可相同或按变体混合（例如部分 FP8 混合 intrinsic）。
+- MFMA completes **D <- A x B + C** (fused matrix multiply-add) in a single instruction, where the tile shape is denoted as **MxNxK**: A is **MxK**, B is **KxN**, C/D is **MxN**.
+- Below, **(C,D) <- (A,B)** denotes the accumulator/result element type and the A, B element types; within the same instruction, A and B types can be identical or mixed by variant (e.g., some FP8 mixed intrinsics).
 
-## 每 CU 峰值 FLOPS/clock（Matrix Core，白皮书口径）
+## Peak FLOPS/clock per CU (Matrix Core, whitepaper figures)
 
-下列为 **每个 CU、每个时钟周期** 在 Matrix Core 上可达到的 **浮点/整数矩阵运算量**（用于与指令周期表、roofline 对照；具体指令仍取决于 **M×N×K** 与 **Cycles** 组合）。
+The following are the **floating-point/integer matrix operation throughput** achievable on the Matrix Core **per CU, per clock cycle** (for cross-referencing with the instruction cycle table and roofline; specific instructions still depend on the **MxNxK** and **Cycles** combination).
 
-| 精度 / 格式 | CDNA3（FLOPS/clock/CU） | CDNA4（FLOPS/clock/CU） |
-|-------------|-------------------------|-------------------------|
+| Precision / Format | CDNA3 (FLOPS/clock/CU) | CDNA4 (FLOPS/clock/CU) |
+|---------------------|-------------------------|-------------------------|
 | FP16 | **2048** | **4096** |
 | FP8 | **4096** | **8192** |
-| INT8 | **4096** | （CDNA4 单列以 ISA / 白皮书为准） |
-| MXFP6 | — | **16384** |
-| MXFP4 | — | **16384** |
-| Matrix FP64 | **256** | **128**（相对 CDNA3 **减半**，面向 AI 负载的架构取舍） |
+| INT8 | **4096** | (Refer to CDNA4 ISA / whitepaper for this column) |
+| MXFP6 | -- | **16384** |
+| MXFP4 | -- | **16384** |
+| Matrix FP64 | **256** | **128** (halved relative to CDNA3, an architectural trade-off targeting AI workloads) |
 
-**代际注意（CDNA4）**：
+**Cross-generation note (CDNA4)**:
 
-- **TF32**：CDNA4 **硬件不再提供 TF32 Matrix 路径**；需依赖 **BF16** 等路径做 **软件模拟**（与 NVIDIA Tensor Core 上原生 TF32 的假设不同，迁移时需改预期与数值验证流程）。
+- **TF32**: CDNA4 **hardware no longer provides a TF32 Matrix path**; it must rely on **BF16** or other paths for **software emulation** (unlike NVIDIA Tensor Core's native TF32 assumption -- expectations and numerical verification procedures must be adjusted during migration).
 
-## CDNA3（GFX942）MFMA：完整指令表（官方博文）
+## CDNA3 (GFX942) MFMA: Complete Instruction Table (Official Blog)
 
-下列为 ROCm 文档中针对 **GFX942** 给出的 MFMA 类型、**M×N×K** 与 **Cycles**（单条指令在 Matrix Core 上的周期数，用于粗略估算吞吐，**非**内存访问延迟）。
+The following are the MFMA types, **MxNxK**, and **Cycles** given in ROCm documentation for **GFX942** (cycle count per instruction on the Matrix Core, for rough throughput estimation; this is **not** memory access latency).
 
-| Type (C,D) ← (A,B) | M×N×K | Cycles |
+| Type (C,D) <- (A,B) | MxNxK | Cycles |
 |---------------------|-------|--------|
-| FP64 ← FP64 | 16×16×4 | 64 |
-| FP32 ← FP32 | 32×32×2 | 64 |
-| FP32 ← FP32 | 16×16×4 | 32 |
-| FP32 ← FP16/BF16 | 32×32×8 | 32 |
-| FP32 ← FP16/BF16 | 16×16×16 | 16 |
-| FP32 ← FP8 (E4M3FNUZ / E5M2FNUZ) | 16×16×32 | 16 |
-| FP32 ← FP8 (E4M3FNUZ / E5M2FNUZ) | 32×32×16 | 32 |
+| FP64 <- FP64 | 16x16x4 | 64 |
+| FP32 <- FP32 | 32x32x2 | 64 |
+| FP32 <- FP32 | 16x16x4 | 32 |
+| FP32 <- FP16/BF16 | 32x32x8 | 32 |
+| FP32 <- FP16/BF16 | 16x16x16 | 16 |
+| FP32 <- FP8 (E4M3FNUZ / E5M2FNUZ) | 16x16x32 | 16 |
+| FP32 <- FP8 (E4M3FNUZ / E5M2FNUZ) | 32x32x16 | 32 |
 
-说明：
+Notes:
 
-- **FP16/BF16**：同一类 MFMA 家族下，BF16 与 FP16 通常共享 **M×N×K** 与 **Cycles**，差异在数据编码与指令助记符中的类型后缀（如 `_f16` / `_bf16`）。
-- **FP64 / FP32 原生**：用于双精度/单精度 GEMM 的「全精度路径」，K 维较小时周期数相对较大，需与访存与指令级并行一起建模。
+- **FP16/BF16**: Within the same MFMA family, BF16 and FP16 typically share the same **MxNxK** and **Cycles**; the difference lies in the data encoding and the type suffix in the instruction mnemonic (e.g., `_f16` / `_bf16`).
+- **FP64 / FP32 native**: "Full precision paths" for double/single precision GEMM; cycle counts are relatively high when the K dimension is small, and must be modeled together with memory access and instruction-level parallelism.
 
-## CDNA4（GFX950）：在 CDNA3 基础上的扩展
+## CDNA4 (GFX950): Extensions Beyond CDNA3
 
-**CDNA4** 在 **FP16/FP8/低比特与 MX** 等方向上提升 **每 CU 矩阵峰值**，但 **Matrix FP64 吞吐减半**、且 **无原生 TF32 Matrix**（见上表与「代际注意」）。指令层面仍保留大量与 CDNA3 兼容的 MFMA 家族，并增加下列条目（更大 **K** 的 FP16 类 tile，以及 **FP8/FP6/FP4** 与 **MXFP*** 块缩放路径）：
+**CDNA4** increases **per-CU matrix peak throughput** in the **FP16/FP8/low-bit and MX** directions, but **Matrix FP64 throughput is halved** and there is **no native TF32 Matrix** (see the table above and "Cross-generation note"). At the instruction level, it retains most MFMA families compatible with CDNA3, and adds the following entries (larger **K** FP16-class tiles, plus **FP8/FP6/FP4** and **MXFP*** block-scaled paths):
 
-| Type (C,D) ← (A,B) | M×N×K | Cycles | Note |
+| Type (C,D) <- (A,B) | MxNxK | Cycles | Note |
 |---------------------|-------|--------|------|
-| FP32 ← FP16/BF16 | 16×16×32 | 16 | **NEW**：相对 CDNA3，**K 加倍** |
-| FP32 ← FP16/BF16 | 32×32×16 | 32 | **NEW**：**K 加倍** |
-| FP32 ← FP8/FP6/FP4 | 16×16×128 | 16–32 | **NEW**：A、B 类型可独立配置 |
-| FP32 ← FP8/FP6/FP4 | 32×32×64 | 32–64 | **NEW** |
-| FP32 ← MXFP8/MXFP6/MXFP4 | 16×16×128 | 16–32 | **NEW**：**block-scaled** |
-| FP32 ← MXFP8/MXFP6/MXFP4 | 32×32×64 | 32–64 | **NEW**：**block-scaled** |
+| FP32 <- FP16/BF16 | 16x16x32 | 16 | **NEW**: **K doubled** relative to CDNA3 |
+| FP32 <- FP16/BF16 | 32x32x16 | 32 | **NEW**: **K doubled** |
+| FP32 <- FP8/FP6/FP4 | 16x16x128 | 16-32 | **NEW**: A and B types can be independently configured |
+| FP32 <- FP8/FP6/FP4 | 32x32x64 | 32-64 | **NEW** |
+| FP32 <- MXFP8/MXFP6/MXFP4 | 16x16x128 | 16-32 | **NEW**: **block-scaled** |
+| FP32 <- MXFP8/MXFP6/MXFP4 | 32x32x64 | 32-64 | **NEW**: **block-scaled** |
 
-其中 **Cycles** 写成区间（如 16–32）表示与具体操作数类型组合、内部实现或时钟域配置相关的可变延迟；做性能建模时应以 **实际内核与 profiler** 为准。
+Where **Cycles** is written as a range (e.g., 16-32), this indicates variable latency depending on the specific operand type combination, internal implementation, or clock domain configuration; for performance modeling, always use **actual kernels and profilers** as the ground truth.
 
-## 编译器 Intrinsic：通用形式与修饰参数
+## Compiler Intrinsics: General Form and Modifier Parameters
 
-LLVM/Clang 暴露的 MFMA 内建函数常见形式为：
+The MFMA built-in functions exposed by LLVM/Clang have the common form:
 
 ```c
 d_reg = __builtin_amdgcn_mfma_ODType_MxNxKInDType(a_reg, b_reg, c_reg, cbsz, abid, blgp);
 ```
 
-- **a_reg / b_reg / c_reg / d_reg**：由编译器与寄存器分配器管理的向量寄存器（通常为 VGPR；若使用 AGPR 累加路径则由 ABI 与后端约定）。
-- **cbsz, abid, blgp**：与 **稀疏/块压缩/操作数位选择** 等相关的控制字段（依具体 intrinsic 与架构而定）；编写汇编或内联实验代码时需对照 **LLVM 内置函数文档** 与对应 `gfx*` 的 **ISA 手册**，避免与 CUDA MMA 的「静态索引」假设混用。
+- **a_reg / b_reg / c_reg / d_reg**: Vector registers managed by the compiler and register allocator (typically VGPRs; if using the AGPR accumulation path, this is governed by ABI and backend conventions).
+- **cbsz, abid, blgp**: Control fields related to **sparsity/block compression/operand bit selection** (depending on the specific intrinsic and architecture); when writing assembly or inline experimental code, cross-reference the **LLVM built-in function documentation** and the corresponding `gfx*` **ISA manual** to avoid conflating with CUDA MMA's "static index" assumptions.
 
-### 命名示例（FP16 / FP8）
+### Naming Examples (FP16 / FP8)
 
-| 语义（示意） | Intrinsic 示例 |
-|--------------|------------------|
-| FP16，16×16×16 | `__builtin_amdgcn_mfma_f32_16x16x16f16` |
-| FP16，32×32×8 | `__builtin_amdgcn_mfma_f32_32x32x8f16` |
-| FP8，32×32×16，A 与 B 均为 FP8 | `__builtin_amdgcn_mfma_f32_32x32x16_fp8_fp8` |
-| FP8，32×32×16，A 为 FP8、B 为 BF8（混合） | `__builtin_amdgcn_mfma_f32_32x32x16_fp8_bf8` |
+| Semantics (illustrative) | Intrinsic Example |
+|--------------------------|-------------------|
+| FP16, 16x16x16 | `__builtin_amdgcn_mfma_f32_16x16x16f16` |
+| FP16, 32x32x8 | `__builtin_amdgcn_mfma_f32_32x32x8f16` |
+| FP8, 32x32x16, both A and B are FP8 | `__builtin_amdgcn_mfma_f32_32x32x16_fp8_fp8` |
+| FP8, 32x32x16, A is FP8, B is BF8 (mixed) | `__builtin_amdgcn_mfma_f32_32x32x16_fp8_bf8` |
 
-### CDNA4：带缩放的 MFMA（scale）
+### CDNA4: Scaled MFMA (scale)
 
-CDNA4 引入与 **FP8/FP6/FP4** 及 **scale** 相关的内建函数，形式示例：
+CDNA4 introduces built-in functions related to **FP8/FP6/FP4** and **scale**, example form:
 
 ```c
 __builtin_amdgcn_mfma_scale_f32_32x32x64_f8f6f4(
@@ -91,122 +91,221 @@ __builtin_amdgcn_mfma_scale_f32_32x32x64_f8f6f4(
 );
 ```
 
-- **Atype / Btype**：标明 A、B 的低比特格式（如 FP8/FP6/FP4 组合）。
-- **OPSEL_*** 与 **scale_***：用于操作数位选择与 per-block 或 per-element scale 路径（与 **MXFP*** 块缩放语义配合）；具体枚举与合法组合以 **ROCm/LLVM 发布说明** 为准。
+- **Atype / Btype**: Specify the low-bit format of A and B (e.g., FP8/FP6/FP4 combinations).
+- **OPSEL_*** and **scale_***: Used for operand bit selection and per-block or per-element scale paths (used in conjunction with **MXFP*** block-scaled semantics); specific enumerations and valid combinations should follow the **ROCm/LLVM release notes**.
 
-## AMD Matrix Instruction Calculator（工具）
+## AMD Matrix Instruction Calculator (Tool)
 
-**AMD Matrix Instruction Calculator**（仓库 **ROCm/amd_matrix_instruction_calculator**）为命令行/Python 工具，用于查询 **MFMA** / **WMMA** 等矩阵指令的编码、寄存器映射与吞吐信息。`--architecture` 可指定 **CDNA2/gfx90a**、**CDNA3/gfx942**、**RDNA4/gfx1201** 等别名。
+**AMD Matrix Instruction Calculator** (repository **ROCm/amd_matrix_instruction_calculator**) is a command-line/Python tool for querying encoding, register mapping, and throughput information for **MFMA** / **WMMA** and other matrix instructions. `--architecture` can specify aliases such as **CDNA2/gfx90a**, **CDNA3/gfx942**, **RDNA4/gfx1201**, etc.
 
-### 五种查询模式
+### Five Query Modes
 
-| 选项 | 作用 |
-|------|------|
-| `--detail-instruction`（`-d`） | 打印指令编码、寄存器用量、计算吞吐量、是否与 **VALU** **co-execute** |
-| `--get-register`（`-g`） | 给定矩阵坐标 → 输出 **vector register**、**lane**、**bit range** |
-| `--matrix-entry`（`-m`） | 给定 **register** + **lane** → 反查矩阵坐标 |
-| `--register-layout`（`-R`） | 打印整块矩阵的 **register/lane** 映射表 |
-| `--matrix-layout`（`-M`） | 打印所有 **register/lane** 对应的矩阵元素 |
+| Option | Function |
+|--------|----------|
+| `--detail-instruction` (`-d`) | Print instruction encoding, register usage, compute throughput, whether it **co-executes** with **VALU** |
+| `--get-register` (`-g`) | Given matrix coordinates -> output **vector register**, **lane**, **bit range** |
+| `--matrix-entry` (`-m`) | Given **register** + **lane** -> reverse-lookup matrix coordinates |
+| `--register-layout` (`-R`) | Print the **register/lane** mapping table for the entire matrix block |
+| `--matrix-layout` (`-M`) | Print the matrix elements corresponding to all **register/lane** pairs |
 
-### CBSZ / ABID / BLGP 修饰符语义
+### CBSZ / ABID / BLGP Modifier Semantics
 
-经典 **MFMA** **intrinsic** 末尾三个整数参数与 **VOP3P-MAI** 编码字段对应：
+The three integer parameters at the end of classic **MFMA** **intrinsics** correspond to **VOP3P-MAI** encoding fields:
 
-| 字段 | 含义 |
-|------|------|
-| **CBSZ**（**Control Broadcast Size**） | 控制 **A** 矩阵 **block** 广播粒度；合法范围为 `0 .. log2(blocks)` |
-| **ABID**（**A-matrix Broadcast Identifier**） | 在 **CBSZ** 定义的广播方案下，选择参与运算的 **A** 的 **block**，范围为 `0 .. 2^CBSZ-1` |
-| **BLGP**（**B-matrix Lane Group Pattern**） | **B** 矩阵在 **lane** 间的 **swizzle** / **broadcast** 模式（**CDNA2** 上常见：`0` 正常；`1`/`2` 为半 **wave** 间广播；`3` 为 **lane** 数据移位；`4–7` 为 **16-lane group** 广播模式等，具体以目标架构 **ISA** 为准） |
+| Field | Meaning |
+|-------|---------|
+| **CBSZ** (**Control Broadcast Size**) | Controls the **A** matrix **block** broadcast granularity; valid range is `0 .. log2(blocks)` |
+| **ABID** (**A-matrix Broadcast Identifier**) | Under the broadcast scheme defined by **CBSZ**, selects which **block** of **A** participates in the computation; range is `0 .. 2^CBSZ-1` |
+| **BLGP** (**B-matrix Lane Group Pattern**) | **B** matrix **swizzle** / **broadcast** pattern across **lanes** (**CDNA2** common values: `0` normal; `1`/`2` broadcast between half **waves**; `3` **lane** data shift; `4-7` **16-lane group** broadcast modes, etc.; specifics depend on target architecture **ISA**) |
 
-另：**OPSEL**、**NEG** / **NEG_HI** 等用于 **16-bit** 在 **32-bit** 寄存器内的半字选择与符号控制，见工具与 **ISA** 手册。
+Additionally: **OPSEL**, **NEG** / **NEG_HI** are used for half-word selection within **32-bit** registers for **16-bit** data and sign control; see the tool and **ISA** manual.
 
-### 寄存器输出格式 `Vx{y}.z`
+### Register Output Format `Vx{y}.z`
 
-工具与文档中常见 **`Vx{y}.z`** 记号：
+The **`Vx{y}.z`** notation is commonly seen in tools and documentation:
 
-- **`x`**：**register** 偏移或编号。
-- **`y`**：**lane** 索引（**wave64** 下为 `0–63`）。
-- **`.z`**：该 **lane** 上寄存器内的 **bit** 区间（如 `[15:0]`、`[31:16]`、`[7:0]`），用于 unpacked 元素或子字。
+- **`x`**: **Register** offset or number.
+- **`y`**: **Lane** index (**wave64**: `0-63`).
+- **`.z`**: The **bit** range within the register at that **lane** (e.g., `[15:0]`, `[31:16]`, `[7:0]`), used for unpacked elements or sub-words.
 
-## rocWMMA fragment 与 MFMA 的关系
+## rocWMMA fragment and Its Relationship to MFMA
 
-**rocWMMA** 在 **wavefront** 粒度提供 **`fragment`** 抽象：**load_matrix_sync** / **mma_sync** / **store_matrix_sync** 将 **DRAM/LDS** 数据与 **MFMA** 使用的寄存器布局衔接。模板参数包括 **FragM/N/K**、**DataT**、**DataLayout**、**Scheduler** 等。
+**rocWMMA** provides a **`fragment`** abstraction at the **wavefront** granularity: **load_matrix_sync** / **mma_sync** / **store_matrix_sync** bridge **DRAM/LDS** data with the register layouts used by **MFMA**. Template parameters include **FragM/N/K**, **DataT**, **DataLayout**, **Scheduler**, etc.
 
-- **fragment** 内部为 **packed** 寄存器存储，元素顺序未必直观，需按文档做 **layout** 与 **scheduler**（如 **default_schedule**、**coop_row_major_2d** 等）配对使用。
-- **mma_sync** 在 **CDNA** 上最终下发 **MFMA**（或架构允许的矩阵指令）；**WMMA** 则对应 **RDNA** 路径。手写 **intrinsic** 时直接控制 **MFMA** 与 **modifier**；**rocWMMA** 则通过 **fragment** 隐藏大部分 **lane–矩阵** 映射细节，但仍需保证整 **wave** 活跃，否则行为未定义。
+- **fragment** internals use **packed** register storage where element ordering may not be intuitive; they must be used in accordance with the documentation for **layout** and **scheduler** pairing (e.g., **default_schedule**, **coop_row_major_2d**, etc.).
+- **mma_sync** on **CDNA** ultimately dispatches **MFMA** (or the matrix instructions permitted by the architecture); **WMMA** corresponds to the **RDNA** path. When hand-writing **intrinsics**, you directly control **MFMA** and **modifiers**; **rocWMMA** hides most **lane-to-matrix** mapping details via **fragments**, but still requires the entire **wave** to be active -- otherwise behavior is undefined.
 
-## FP8 与低精度格式：CDNA3 vs CDNA4
+## FP8 and Low-Precision Formats: CDNA3 vs CDNA4
 
-| 项目 | CDNA3（GFX942） | CDNA4（GFX950） |
+| Item | CDNA3 (GFX942) | CDNA4 (GFX950) |
 |------|-----------------|-----------------|
-| FP8 风格 | **E4M3FNUZ**、**E5M2FNUZ**（非标准 OCP，指数偏置常为 **8 / 16**） | **E4M3FN**、**E5M2**（**OCP** 风格，指数偏置 **7 / 15**） |
-| 迁移注意 | 既有内核若硬编码 FNUZ 语义，在 CDNA4 上需核对 **reinterpret / 转换** | 与 **OCP FP8** 生态（训练框架、量化工具）对齐更容易 |
+| FP8 flavor | **E4M3FNUZ**, **E5M2FNUZ** (non-standard OCP, exponent bias typically **8 / 16**) | **E4M3FN**, **E5M2** (**OCP** flavor, exponent bias **7 / 15**) |
+| Migration note | Existing kernels that hard-code FNUZ semantics need to verify **reinterpret / conversion** on CDNA4 | Easier to align with the **OCP FP8** ecosystem (training frameworks, quantization tools) |
 
-HIP 侧常见存储类型（名称随 ROCm 版本演进，以头文件为准）：
+Common storage types on the HIP side (names evolve with ROCm versions; refer to header files):
 
 - `__hip_fp8_storage_t`
 - `__amd_fp8_storage_t`
 
-在调用 intrinsic 前，通常需要将 **FP8 操作数** 按 ABI 要求 **扩展到合适寄存器宽度**；官方示例中常将 FP8 操作数 **cast 为 `long`** 再传入内建，以避免隐式转换与未定义布局。
+Before calling intrinsics, **FP8 operands** typically need to be **extended to the appropriate register width** per ABI requirements; official examples commonly **cast FP8 operands to `long`** before passing them to built-ins, to avoid implicit conversion and undefined layout.
 
-## 峰值算力估算公式（Matrix Core）
+## Peak Compute Estimation Formula (Matrix Core)
 
-官方博文给出的 **峰值 TFLOP/s** 估算形式为：
+The official blog provides the **peak TFLOP/s** estimation in the following form:
 
 ```text
 Peak_TFLOPS = 2 * M * N * K * num_matrix_cores * (max_engine_clock_Hz / cycle_count) / 1e6
 ```
 
-- **2×M×N×K**：一次 MFMA 在 **FMA** 意义下的浮点 op 计数（乘与加各计）。
-- **num_matrix_cores**：GPU 上 Matrix Core 总个数（因产品而异，例如 MI300 系列文档中为 **1216**）。
-- **max_engine_clock**：峰值引擎频率（Hz）。
-- **cycle_count**：该 MFMA 变体对应的 **Cycles**（上表）。
+- **2 x M x N x K**: The floating-point op count of one MFMA in the **FMA** sense (multiply and add each counted).
+- **num_matrix_cores**: Total number of Matrix Cores on the GPU (varies by product; e.g., the MI300 series documentation states **1216**).
+- **max_engine_clock**: Peak engine frequency (Hz).
+- **cycle_count**: The **Cycles** corresponding to that MFMA variant (from the table above).
 
-**MI325X（GFX942）** 示例（FP16 **32×32×8**，**Cycles = 32**，**1216** 个 Matrix Core，**2100 MHz**）：
+**MI325X (GFX942)** example (FP16 **32x32x8**, **Cycles = 32**, **1216** Matrix Cores, **2100 MHz**):
 
 ```text
-2 * 32 * 32 * 8 * 1216 * (2100e6 / 32) / 1e6 ≈ 1307.4 TFLOP/s
+2 * 32 * 32 * 8 * 1216 * (2100e6 / 32) / 1e6 ~ 1307.4 TFLOP/s
 ```
 
-该数值与 `hardware/mi300x.md` 中官方标称 **FP16/BF16 峰值** 一致；换用其他 **M×N×K** 或 **cycle_count** 时，应同步替换公式中的两项。
+This value is consistent with the official **FP16/BF16 peak** stated in `hardware/mi300x.md`; when using a different **MxNxK** or **cycle_count**, both terms in the formula must be updated accordingly.
 
-## 数据布局与 Wavefront 映射要点
+## Data Layout and Wavefront Mapping Key Points
 
-以下归纳自官方示例与社区实践，用于手写内核或核对编译器输出：
+The following is summarized from official examples and community practice, for use when hand-writing kernels or verifying compiler output:
 
-- **Wavefront 宽度**：**64 threads**；MFMA 的矩阵元素在 **64 条 lane** 间 **分布存放**，与 NVIDIA warp（32 lane）的 MMA 布局 **不同**，**不可**按 CUDA 经验直接照搬索引。
-- **每线程持有的元素数（概念上）**：
-  - A：**M×K / 64**
-  - B：**K×N / 64**
-  - C/D：**M×N / 64**
-- **寄存器类型**：结果常落在 **VGPR** 的向量类型中（如 `fp32x4_t`、`fp32x16_t` 等，依 tile 与后端而定）。
-- **FP8 调用约定**：操作数在传入 intrinsic 前常 **cast 为 `long`**，以保证寄存器宽度与调用约定一致。
-- **与 NVIDIA MMA 对比**：lane 到 **(row,col)** 的映射规则不同；做 **layout 转换** 或 **与 CUTLASS/cuBLAS 结果 bitwise 对比** 时，必须以 **AMD 文档或 llvm-mca / 反汇编** 为准。
+- **Wavefront width**: **64 threads**; MFMA matrix elements are **distributed across 64 lanes**, which is **different** from NVIDIA's warp (32 lanes) MMA layout -- you **cannot** directly copy indexing from CUDA experience.
+- **Number of elements held per thread (conceptually)**:
+  - A: **M x K / 64**
+  - B: **K x N / 64**
+  - C/D: **M x N / 64**
+- **Register types**: Results typically reside in **VGPR** vector types (e.g., `fp32x4_t`, `fp32x16_t`, depending on tile and backend).
+- **FP8 calling convention**: Operands are commonly **cast to `long`** before passing to intrinsics, to ensure register width and calling convention consistency.
+- **Comparison with NVIDIA MMA**: The lane-to-**(row, col)** mapping rules are different; when performing **layout conversion** or **bitwise comparison with CUTLASS/cuBLAS results**, always use **AMD documentation or llvm-mca / disassembly** as the reference.
 
-## 汇编层与 INT8 等其它变体
+## Assembly Layer and INT8 and Other Variants
 
-- 汇编助记符习惯写作 **`v_mfma_{out}_{M}x{N}x{K}_{in}`**（具体后缀因类型与编码而异）。
-- **INT8 → INT32** 等整数 MFMA 在 ISA 中同样存在（旧版笔记曾列 `v_mfma_i32_16x16x32_i8`）；**M×N×K、周期与寄存器 packing** 请以目标 `gfx` 的 **ISA 手册** 与 **LLVM `IntrinsicsAMDGPU.td`** 为准，本文以浮点与 FP8 主线为主。
+- Assembly mnemonics are conventionally written as **`v_mfma_{out}_{M}x{N}x{K}_{in}`** (specific suffixes vary by type and encoding).
+- **INT8 -> INT32** and other integer MFMA instructions also exist in the ISA (older notes listed `v_mfma_i32_16x16x32_i8`); for **MxNxK, cycles, and register packing**, refer to the target `gfx` **ISA manual** and **LLVM `IntrinsicsAMDGPU.td`** -- this document focuses on the floating-point and FP8 mainline.
 
-## 与 NVIDIA Tensor Core 的简要对比
+## Brief Comparison with NVIDIA Tensor Core
 
-| 方面 | AMD MFMA | NVIDIA Tensor Core (MMA) |
-|------|----------|---------------------------|
-| 执行粒度 | **64 lane** wavefront | **32 lane** warp |
-| 累加器 | **AGPR**（CDNA）或 VGPR，与 CUDA 路径不同 | 架构相关，常与寄存器文件紧耦合 |
-| 布局 | **lane–矩阵** 映射与 CUDA **不同** | 以 NVIDIA 文档为准 |
-| 软件栈 | ROCm、HIP、LLVM intrinsics | CUDA、PTX、mma.sync |
+| Aspect | AMD MFMA | NVIDIA Tensor Core (MMA) |
+|--------|----------|---------------------------|
+| Execution granularity | **64-lane** wavefront | **32-lane** warp |
+| Accumulator | **AGPR** (CDNA) or VGPR, different from the CUDA path | Architecture-dependent, often tightly coupled with register file |
+| Layout | **Lane-to-matrix** mapping is **different** from CUDA | Per NVIDIA documentation |
+| Software stack | ROCm, HIP, LLVM intrinsics | CUDA, PTX, mma.sync |
 
-## 优化建议（与访存协同）
+## Optimization Recommendations (Coordinating with Memory Access)
 
-1. **指令级并行**：在 MFMA **占满周期** 的同时，发射 **global_load / DS 读写**，用 `s_waitcnt` 精确控制，隐藏 **VMEM/LDS** 延迟。
-2. **累加器与寄存器压力**：优先用 **AGPR** 承载 MFMA 累加链，**释放 VGPR**，提高 wave **occupancy**（详见 `register-allocation.md`）。
-3. **Tile 选择**：在 **周期与寄存器占用** 间权衡；例如 **32×32×8** 相对 **16×16×16** 往往在不同瓶颈下表现不同，需结合 **roofline** 与 **occupancy** 实测。
-4. **跨代兼容**：面向 **CDNA4** 时，关注 **更大 K 的 FP16** 与 **FP6/FP4/MX** 新指令族；编译选项与 `offload-arch` 需设为 **`gfx950`**（或产品对应目标）。
-5. **数值路径**：FP8 训练/推理若在 **FNUZ（CDNA3）** 与 **OCP（CDNA4）** 间迁移，务必做 **数值回归** 与 **精度对齐**。
+1. **Instruction-level parallelism**: While MFMA **occupies its full cycle count**, issue **global_load / DS reads and writes** simultaneously, using `s_waitcnt` for precise control to hide **VMEM/LDS** latency.
+2. **Accumulator and register pressure**: Prefer using **AGPR** to carry MFMA accumulation chains, **freeing VGPRs** and improving wave **occupancy** (see `register-allocation.md` for details).
+3. **Tile selection**: Balance between **cycle count and register occupancy**; for example, **32x32x8** vs **16x16x16** often perform differently under different bottlenecks -- test with **roofline** and **occupancy** measurements.
+4. **Cross-generation compatibility**: When targeting **CDNA4**, pay attention to **larger-K FP16** and the new **FP6/FP4/MX** instruction families; compilation options and `offload-arch` should be set to **`gfx950`** (or the product-specific target).
+5. **Numerical paths**: If FP8 training/inference migrates between **FNUZ (CDNA3)** and **OCP (CDNA4)**, be sure to perform **numerical regression** and **precision alignment**.
 
-## 参考
+## VOP3P-MAI Encoding Format (CDNA1-3)
 
-- AMD ROCm Blog: *Matrix Core Programming*（含 **MFMA 表**、intrinsic 示例与峰值公式）。
-- LLVM：`IntrinsicsAMDGPU.td`、Clang `__builtin_amdgcn_mfma_*` 定义。
-- 各代 *RDNA/CDNA ISA Reference*（指令编码与延迟细节）。
+MFMA instructions are encoded in the **VOP3P-MAI** format. The key encoding fields are:
+
+| Field | Purpose |
+|-------|---------|
+| **Src0** | A matrix source register |
+| **Src1** | B matrix source register |
+| **Src2** | C matrix source (accumulator input) |
+| **Vdst** | D matrix destination (accumulator output) |
+| **CBSZ** (3-bit) | Control Broadcast Size |
+| **ABID** (4-bit) | A-matrix Broadcast Identifier |
+| **BLGP** (3-bit) | B-matrix Lane Group Pattern |
+
+### BLGP Values and Their Effects on B-Matrix (CDNA2 Reference)
+
+| BLGP Value | Effect on B-matrix |
+|------------|-------------------|
+| 0 | Normal layout (no transformation) |
+| 1 | Lanes 0-31 broadcast to lanes 32-63 |
+| 2 | Lanes 32-63 broadcast to lanes 0-31 |
+| 3 | All lane data shifted down by 16 bits |
+| 4-7 | 16-lane group broadcast modes |
+
+These values are architecture-dependent; always verify against the target `gfx*` ISA manual.
+
+## Low-Precision Floating-Point Type Details
+
+### Complete Type Reference Table
+
+| Width | Shorthand | Exp Bias | Range | Hardware Support |
+|-------|-----------|----------|-------|-----------------|
+| 16-bit | E5M10 (FP16) | 15 | +/-65504 | All architectures |
+| 16-bit | E8M7 (BF16) | 127 | +/-3.39e38 | gfx90a+ |
+| 8-bit | E4M3FN (OCP FP8) | 7 | +/-448 | CDNA4 (gfx950) default |
+| 8-bit | E4M3FNUZ | 8 | +/-240 | CDNA3 (gfx942) default |
+| 8-bit | E5M2 (OCP BF8) | 15 | +/-57344 | CDNA4 (gfx950) |
+| 8-bit | E5M2FNUZ | 16 | (FNUZ range) | CDNA3 (gfx942) |
+| 8-bit | E8M0 | 127 | 2^(+/-127) | Scale factor only (CDNA4) |
+| 6-bit | E2M3 | 1 | +/-7.5 | CDNA4 only |
+| 6-bit | E3M2 | 3 | +/-28 | CDNA4 only |
+| 4-bit | E2M1 (FP4) | 1 | +/-6 | CDNA4 only |
+
+### HIP Header Paths and Classes
+
+| Type | Header | Classes |
+|------|--------|---------|
+| FP4 (E2M1) | `<hip/amd_detail/amd_hip_fp4.h>` | `__hip_fp4_e2m1`, `__hip_fp4x2_e2m1`, `__hip_fp4x4_e2m1` |
+| FP6 (E2M3/E3M2) | `<hip/amd_detail/amd_hip_fp6.h>` | `__hip_fp6_e2m3`, `__hip_fp6_e3m2`, plus `x2`/`x4` vector variants |
+| FP8 | `<hip/amd_detail/amd_hip_fp8.h>` | `__hip_fp8_e4m3`, `__hip_fp8_e5m2` (OCP); `__hip_fp8_e4m3_fnuz`, `__hip_fp8_e5m2_fnuz` (FNUZ) |
+| FP16 | `<hip/amd_detail/amd_hip_fp16.h>` | `__half` |
+| BF16 | `<hip/amd_detail/amd_hip_bf16.h>` | `__hip_bfloat16` |
+
+### Microscaling APIs (gfx950 / CDNA4)
+
+CDNA4 introduces **hipExt microscaling APIs** with `__amd_scale_t` (E8M0 format) for scaled MFMA operations. These enable block-scaled FP8/FP6/FP4 inputs with per-block scale factors, used for mixed-precision GEMM with minimal accuracy loss.
+
+## FP8 MFMA Kernel Example (HIP)
+
+Complete example of a 32x32x16 FP8 MFMA kernel:
+
+```cpp
+#include <hip/hip_runtime.h>
+#include <hip/hip_fp8.h>
+
+using fp8_t = __hip_fp8_storage_t;
+using fp8x8_t = __attribute__((vector_size(8 * sizeof(fp8_t)))) fp8_t;
+using fp32x16_t = __attribute__((vector_size(16 * sizeof(float)))) float;
+
+__global__ void mfma_fp32_32x32x16_fp8(const fp8_t* A, const fp8_t* B, float* C) {
+    fp8x8_t a_reg;
+    fp8x8_t b_reg;
+    fp32x16_t c_reg {};
+
+    a_reg = *reinterpret_cast<const fp8x8_t*>(
+        A + (threadIdx.x / 32) * 8 + (threadIdx.x % 32) * 16);
+
+    for (int i = 0; i < 8; i++)
+        b_reg[i] = *(B + i * 32 + threadIdx.x % 32 + (threadIdx.x / 32) * 8 * 32);
+
+    // Note: intrinsic expects (long) casts for FP8 operands
+    c_reg = __builtin_amdgcn_mfma_f32_32x32x16_fp8_fp8(
+        (long)a_reg, (long)b_reg, c_reg, 0, 0, 0);
+
+    for (int i = 0; i < 4; i++) {
+        C[threadIdx.x % 32 + (threadIdx.x / 32) * 4 * 32 + i * 32 * 8]          = c_reg[i*4];
+        C[threadIdx.x % 32 + (threadIdx.x / 32) * 4 * 32 + 32*1 + i * 32 * 8]   = c_reg[i*4+1];
+        C[threadIdx.x % 32 + (threadIdx.x / 32) * 4 * 32 + 32*2 + i * 32 * 8]   = c_reg[i*4+2];
+        C[threadIdx.x % 32 + (threadIdx.x / 32) * 4 * 32 + 32*3 + i * 32 * 8]   = c_reg[i*4+3];
+    }
+}
+```
+
+Key points:
+- FP8 operands stored as `fp8x8_t` (8 bytes per thread for A and B)
+- Accumulator is `fp32x16_t` (16 floats per thread for C/D)
+- FP8 operands must be cast to `long` before passing to the intrinsic
+- The lane-to-matrix mapping follows CDNA conventions (64-lane wavefront)
+
+## References
+
+- AMD ROCm Blog: *Matrix Core Programming* (contains **MFMA tables**, intrinsic examples, and peak formulas).
+- LLVM: `IntrinsicsAMDGPU.td`, Clang `__builtin_amdgcn_mfma_*` definitions.
+- Per-generation *RDNA/CDNA ISA Reference* (instruction encoding and latency details).

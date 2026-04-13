@@ -1,37 +1,37 @@
-# HIP 内联汇编常用 Pattern
+# HIP Inline Assembly Common Patterns
 
-## 何时使用内联汇编
+## When to Use Inline Assembly
 
-1. 编译器未能生成最优指令（用 `-save-temps` 验证）
-2. 需要 intrinsics 未暴露的特定指令
-3. 关键内层循环的最后手段 — 优先使用 `__builtin_amdgcn_*`
+1. The compiler fails to generate optimal instructions (verify with `-save-temps`)
+2. You need specific instructions not exposed by intrinsics
+3. Last resort for critical inner loops -- prefer `__builtin_amdgcn_*` first
 
-## 语法
+## Syntax
 
 ```cpp
 asm volatile("v_add_f32 %0, %1, %2" : "=v"(result) : "v"(a), "v"(b));
 ```
 
-约束代码：
+Constraint codes:
 
 - `v` = VGPR, `s` = SGPR, `a` = AGPR
-- `=` = 输出, 无前缀 = 输入
+- `=` = output, no prefix = input
 
-## Builtin → ISA 映射
+## Builtin -> ISA Mapping
 
-| Builtin | ISA 指令 | 用途 |
-|---------|---------|------|
-| `__builtin_amdgcn_readfirstlane(v)` | v_readfirstlane_b32 | 将第一个 lane 广播到 SGPR |
-| `__builtin_amdgcn_ds_swizzle(v, pat)` | ds_swizzle_b32 | Lane 排列（无 LDS 流量） |
-| `__builtin_amdgcn_mov_dpp(v, ctrl, ...)` | v_mov_b32 dpp | 数据并行原语 |
-| `__shfl_sync` 等价物 | ds_swizzle / dpp | 跨 lane 通信 |
+| Builtin | ISA Instruction | Purpose |
+|---------|----------------|---------|
+| `__builtin_amdgcn_readfirstlane(v)` | v_readfirstlane_b32 | Broadcast first lane to SGPR |
+| `__builtin_amdgcn_ds_swizzle(v, pat)` | ds_swizzle_b32 | Lane permutation (no LDS traffic) |
+| `__builtin_amdgcn_mov_dpp(v, ctrl, ...)` | v_mov_b32 dpp | Data parallel primitive |
+| `__shfl_sync` equivalent | ds_swizzle / dpp | Cross-lane communication |
 
-## 常见优化 Pattern
+## Common Optimization Patterns
 
-### 1. 向量化 Global Load
+### 1. Vectorized Global Load
 
 ```cpp
-// 强制 128 位 load（一次 4 个 float）
+// Force 128-bit load (4 floats at once)
 float4 data;
 asm volatile(
     "global_load_dwordx4 %0, %1, off"
@@ -39,40 +39,40 @@ asm volatile(
 );
 ```
 
-### 2. LDS Swizzle 消除 Bank Conflict
+### 2. LDS Swizzle to Eliminate Bank Conflicts
 
 ```cpp
-// 矩阵转置时避免 bank conflict 的 swizzle pattern
+// Swizzle pattern to avoid bank conflicts during matrix transpose
 int swizzled = __builtin_amdgcn_ds_swizzle(val, 0x041f);
 ```
 
-### 3. 内层循环手动 MFMA
+### 3. Manual MFMA in Inner Loop
 
 ```cpp
-// 当编译器 MFMA 调度不理想时
+// When compiler MFMA scheduling is suboptimal
 asm volatile(
     "v_mfma_f32_16x16x16_bf16 %0, %1, %2, %0"
-    : "+a"(acc)  // AGPR 累加器（读写）
+    : "+a"(acc)  // AGPR accumulator (read-write)
     : "v"(a_frag), "v"(b_frag)
 );
 ```
 
-### 4. 精确 s_waitcnt
+### 4. Precise s_waitcnt
 
 ```cpp
-// 等待恰好 1 个未完成的 VMEM 操作
+// Wait for exactly 1 outstanding VMEM operation
 asm volatile("s_waitcnt vmcnt(1)" ::: "memory");
 ```
 
 ---
 
-## 调度与优先级 Builtins（CK / 博文）
+## Scheduling and Priority Builtins (CK / Blog Posts)
 
-### `__builtin_amdgcn_s_setprio(N)` — Wave 优先级
+### `__builtin_amdgcn_s_setprio(N)` -- Wave Priority
 
-- **语义**：设置当前 wave 的调度优先级，`N ∈ [0, 3]`。
-- **惯例**：**0** = 低优先级，**3** = 高优先级；在 CU 资源争用时，高优先级 wave 更容易被选中。
-- **用途**：8-wave ping-pong 中在 **memory phase** 短暂 `s_setprio(1)`（或更高），compute phase 回到 `0`，与 barrier 配合重叠访存与 MFMA。
+- **Semantics**: Sets the scheduling priority of the current wave, `N in [0, 3]`.
+- **Convention**: **0** = low priority, **3** = high priority; when CU resources are contended, higher-priority waves are more likely to be selected.
+- **Use case**: In 8-wave ping-pong, briefly `s_setprio(1)` (or higher) during the **memory phase**, return to `0` during the compute phase, combined with barriers to overlap memory access and MFMA.
 
 ```cpp
 __builtin_amdgcn_s_setprio(1);
@@ -81,23 +81,23 @@ __builtin_amdgcn_sched_barrier(0);
 __builtin_amdgcn_s_setprio(0);
 ```
 
-### `__builtin_amdgcn_sched_barrier(mask)` — 调度栅栏
+### `__builtin_amdgcn_sched_barrier(mask)` -- Scheduling Fence
 
-- **语义**：限制编译器/硬件对某些指令类型的跨栅栏重排。
-- **`mask == 0`**：**硬栅栏**，不允许任意指令越过该点重排（与 CK 中 `sched_barrier(0)` 用法一致）。
-- **非零 mask**：仅允许**掩码对应类别**的指令越过（具体行为以编译器与架构文档为准；常用于与 MFMA/SALU 交错）。
+- **Semantics**: Restricts compiler/hardware reordering of certain instruction types across the fence.
+- **`mask == 0`**: **Hard fence** -- no instructions of any type may be reordered past this point (consistent with CK's `sched_barrier(0)` usage).
+- **Non-zero mask**: Only allows instructions **matching the mask categories** to cross (specific behavior depends on compiler and architecture documentation; commonly used for interleaving with MFMA/SALU).
 
-**与 `sched_group_barrier` 的分工**：在 CK 与 LLVM 暴露的接口里，**按指令类计数发射**（例如「再发 1 组 MFMA」「再发 1 组 SALU」）通常写作 **`__builtin_amdgcn_sched_group_barrier(mask, count, ds_id)`**，其中掩码与 `LLVMSchedGroupMask` 一致：
+**Division of labor with `sched_group_barrier`**: In the interfaces exposed by CK and LLVM, **counted dispatch by instruction category** (e.g., "issue 1 more MFMA group", "issue 1 more SALU group") is typically written as **`__builtin_amdgcn_sched_group_barrier(mask, count, ds_id)`**, where the mask aligns with `LLVMSchedGroupMask`:
 
-- **`0x008`**：MFMA 类
-- **`0x004`**：SALU 类
+- **`0x008`**: MFMA category
+- **`0x004`**: SALU category
 
-纯 **`sched_barrier(0)`** 则用于 **完全禁止重排** 的同步点；不要把「只放行 MFMA」与「硬栅栏」混用同一调用，需对照生成的 ISA。
+A plain **`sched_barrier(0)`** is used for **completely disabling reordering** at synchronization points; do not mix "only allow MFMA through" with "hard fence" in the same call -- verify against the generated ISA.
 
-### `__builtin_amdgcn_sched_group_barrier(mask, count, ds_id)` — 分组调度
+### `__builtin_amdgcn_sched_group_barrier(mask, count, ds_id)` -- Group Scheduling
 
-- **语义**：按**指令组**发射：在发出 `count` 个属于 `mask` 类型的指令组之前，限制其它组的乱序跨越。
-- **示例**（CK eight-wave hot loop）：连续三次 `sched_group_barrier(0x008, 1, 0)` 约束 MFMA 发射节奏，再 `sched_group_barrier(0x004, 1, 0)` 与 `s_waitcnt` 包装的 LDS 行为交错，最后 `sched_barrier(0)` 硬栅栏。
+- **Semantics**: Dispatch by **instruction group**: before issuing `count` instruction groups of the type specified by `mask`, restrict other groups from reordering across.
+- **Example** (CK eight-wave hot loop): Three consecutive `sched_group_barrier(0x008, 1, 0)` constrain MFMA dispatch cadence, then `sched_group_barrier(0x004, 1, 0)` interleaves with `s_waitcnt`-wrapped LDS behavior, followed by a `sched_barrier(0)` hard fence.
 
 ```cpp
 __builtin_amdgcn_sched_group_barrier(0x008, 1, 0);  // issue 1 MFMA group
@@ -105,13 +105,13 @@ __builtin_amdgcn_sched_group_barrier(0x004, 1, 0);  // issue 1 SALU group
 __builtin_amdgcn_sched_barrier(0);
 ```
 
-`ds_id` 参数在 CK 中常取 **0**；多 DS 队列场景见 ISA/编译器说明。
+The `ds_id` parameter is commonly **0** in CK; for multi-DS-queue scenarios, see ISA/compiler documentation.
 
 ---
 
-## buffer_load_lds（Global → LDS）内联路径
+## buffer_load_lds (Global -> LDS) Inline Path
 
-### LLVM intrinsic（推荐在 HIP 中外链声明）
+### LLVM intrinsic (recommended to declare as extern in HIP)
 
 ```cpp
 using i32x4 = int32_t __attribute__((ext_vector_type(4)));
@@ -123,9 +123,9 @@ extern "C" __device__ void llvm_amdgcn_raw_buffer_load_lds(
     __asm("llvm.amdgcn.raw.buffer.load.lds");
 ```
 
-### 手写 asm：`buffer_load_dwordx4 ... lds`（gfx950 等）
+### Hand-written asm: `buffer_load_dwordx4 ... lds` (gfx950, etc.)
 
-数据直接进入 LDS，output 操作数为 LDS 指针表示目标（由编译器约束为 `=r`/`smem`）：
+Data goes directly into LDS; the output operand is an LDS pointer indicating the destination (constrained by the compiler as `=r`/`smem`):
 
 ```cpp
 asm volatile("buffer_load_dwordx4 %1, %2, 0 offen offset:%3 lds"
@@ -134,31 +134,31 @@ asm volatile("buffer_load_dwordx4 %1, %2, 0 offen offset:%3 lds"
              : "memory");
 ```
 
-配合 **128-bit buffer resource**（`make_wave_buffer_resource` / `buffer_resource` 结构体 bitcast 为 `int32x4`）使用。详见 `references/kernel-recipes.md` 中 buffer_load_lds 节。
+Used with **128-bit buffer resource** (`make_wave_buffer_resource` / `buffer_resource` struct bitcast to `int32x4`). See the buffer_load_lds section in `references/kernel-recipes.md` for details.
 
 ---
 
-## 架构自适应 waitcnt（CK 思路）
+## Architecture-Adaptive waitcnt (CK Approach)
 
-gfx9/gfx11 使用 `s_waitcnt` 合并域；gfx12 等可能拆分 load/ds 计数。CK 用模板封装统一接口，避免手写错误编码：
+gfx9/gfx11 use `s_waitcnt` with merged domains; gfx12 and later may split load/ds counters. CK uses template wrappers for a unified interface to avoid hand-writing incorrect encodings:
 
 ```cpp
-// 典型调用（伪代码）：在 global→LDS 后等待 VMEM，再 lgkm
+// Typical call (pseudocode): after global->LDS, wait for VMEM, then lgkm
 // s_waitcnt<vmcnt, expcnt, lgkmcnt>();
-// gfx12: 可能变为 s_wait_loadcnt_dscnt + barrier_signal / barrier_wait
+// gfx12: may become s_wait_loadcnt_dscnt + barrier_signal / barrier_wait
 ```
 
-**实践**：在移植 kernel 时，用 `__builtin_amdgcn_s_waitcnt` 与项目里的架构宏（`__gfx12__` 等）分支；不要在未测架构上硬编码单一 asm。
+**Practice**: When porting kernels, use `__builtin_amdgcn_s_waitcnt` with architecture macros in the project (`__gfx12__`, etc.) to branch; do not hard-code a single asm on untested architectures.
 
 ---
 
-## 决策指南
+## Decision Guide
 
-| 场景 | 方法 |
-|------|------|
-| 需要跨 lane 操作 | 先尝试 `__builtin_amdgcn_*` |
-| 编译器生成了次优 load | 检查 `-O3` 是否修复，否则尝试 asm |
-| MFMA 调度不正确 | 先 profile，确认后再用手动 asm；并对照 `scheduling-pipeline.md` MFMA NOP 表 |
-| 需要精确的等待计数 | 内联 `s_waitcnt` 或 CK 式模板；gfx12 查 loadcnt/dscnt |
-| Global→LDS 直达 | `llvm.amdgcn.raw.buffer.load.lds` 或 `buffer_load_* ... lds` |
-| Wave 间抢占 LDS/VM 带宽 | `s_setprio` + `sched_barrier` / `sched_group_barrier` |
+| Scenario | Approach |
+|----------|----------|
+| Need cross-lane operations | Try `__builtin_amdgcn_*` first |
+| Compiler generates suboptimal loads | Check if `-O3` fixes it, otherwise try asm |
+| MFMA scheduling is incorrect | Profile first, confirm, then use manual asm; cross-reference the MFMA NOP table in `scheduling-pipeline.md` |
+| Need precise wait counts | Inline `s_waitcnt` or CK-style templates; for gfx12, check loadcnt/dscnt |
+| Global->LDS direct path | `llvm.amdgcn.raw.buffer.load.lds` or `buffer_load_* ... lds` |
+| Waves competing for LDS/VM bandwidth | `s_setprio` + `sched_barrier` / `sched_group_barrier` |

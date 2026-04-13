@@ -1,88 +1,88 @@
-# 指令调度与流水线指南
+# Instruction Scheduling and Pipeline Guide
 
-## CDNA3 流水线模型
+## CDNA3 Pipeline Model
 
-每个 CU 有 4 个 SIMD 单元。每个 SIMD：
+Each CU has 4 SIMD units. Each SIMD:
 
-- 每周期执行一条 wavefront 指令
-- 在就绪的 wavefront 之间轮询（TLP 隐藏延迟）
+- Executes one wavefront instruction per cycle
+- Round-robins among ready wavefronts (TLP hides latency)
 
-延迟隐藏：如果 wavefront A 在内存上停顿，SIMD 执行 wavefront B、C、D 等。
+Latency hiding: If wavefront A stalls on memory, SIMD executes wavefront B, C, D, etc.
 
-## 指令级并行（ILP）
+## Instruction-Level Parallelism (ILP)
 
-当 occupancy 较低（wavefront 少）时，单个 wavefront 内的 ILP 变得至关重要。
+When occupancy is low (few wavefronts), ILP within a single wavefront becomes critical.
 
-**目标**：通过交错独立指令保持流水线饱满。
+**Goal**: Keep the pipeline saturated by interleaving independent instructions.
 
 ```
-// 差：依赖链 → 流水线停顿
+// Bad: dependency chain -> pipeline stall
 global_load v0, ...
-s_waitcnt vmcnt(0)    // 在此停顿
-v_add_f32 v1, v0, v2  // 必须等待 load
+s_waitcnt vmcnt(0)    // stalls here
+v_add_f32 v1, v0, v2  // must wait for load
 
-// 好：交错独立工作
-global_load v0, ...    // 发射 load
-v_mul_f32 v3, v4, v5   // 独立的 VALU 工作
-s_add_u32 s0, s0, 1    // 独立的 SALU 工作（可双发射！）
-s_waitcnt vmcnt(0)     // 此时 load 大概率已完成
-v_add_f32 v1, v0, v2   // 使用已加载的数据
+// Good: interleave independent work
+global_load v0, ...    // issue load
+v_mul_f32 v3, v4, v5   // independent VALU work
+s_add_u32 s0, s0, 1    // independent SALU work (can dual-issue!)
+s_waitcnt vmcnt(0)     // load likely completed by now
+v_add_f32 v1, v0, v2   // use the loaded data
 ```
 
-## s_waitcnt 策略
+## s_waitcnt Strategy
 
-**原则**：尽可能晚等待，尽可能少等待。
+**Principle**: Wait as late as possible, wait as little as possible.
 
-| 模式 | 代码 | 原因 |
-|------|------|------|
-| 立即等待 | load 后立即 `s_waitcnt vmcnt(0)` | 差：杀死 ILP |
-| 延迟等待 | load，做其他工作，然后等待 | 好：隐藏延迟 |
-| 部分等待 | `vmcnt(N)` 其中 N = 允许挂起的剩余操作数 | 最佳：最小停顿 |
+| Pattern | Code | Reason |
+|---------|------|--------|
+| Immediate wait | `s_waitcnt vmcnt(0)` right after load | Bad: kills ILP |
+| Deferred wait | Load, do other work, then wait | Good: hides latency |
+| Partial wait | `vmcnt(N)` where N = allowed outstanding operations remaining | Best: minimal stall |
 
-## 双发射规则（CDNA3）
+## Dual-Issue Rules (CDNA3)
 
-VALU + SALU 可在同一周期发射，条件：
+VALU + SALU can issue in the same cycle, provided:
 
-1. 两者之间无寄存器依赖
-2. VALU 使用 VGPR，SALU 使用 SGPR
-3. 两者都就绪（无挂起的等待）
+1. No register dependency between them
+2. VALU uses VGPR, SALU uses SGPR
+3. Both are ready (no pending waits)
 
-**优化**：将地址计算（SALU）与数据操作（VALU）配对。
+**Optimization**: Pair address calculations (SALU) with data operations (VALU).
 
-## MFMA 调度
+## MFMA Scheduling
 
-MFMA 指令延迟高（64 周期）但可与其他工作重叠：
+MFMA instructions have high latency (64 cycles) but can overlap with other work:
 
 ```
-// 流水线：MFMA N 执行时，加载 N+1 的数据
-v_mfma_f32_32x32x8_bf16 a[0:15], v[0:3], v[4:7], a[0:15]  // 64 周期
-global_load_dwordx4 v[0:3], ...  // 在 MFMA 延迟期间发射
-global_load_dwordx4 v[4:7], ...  // 在 MFMA 延迟期间发射
-s_waitcnt vmcnt(0)               // 此时 load 应已完成
-v_mfma_f32_32x32x8_bf16 a[0:15], v[0:3], v[4:7], a[0:15]  // 下一个 MFMA
+// Pipeline: while MFMA N executes, load data for N+1
+v_mfma_f32_32x32x8_bf16 a[0:15], v[0:3], v[4:7], a[0:15]  // 64 cycles
+global_load_dwordx4 v[0:3], ...  // issue during MFMA latency
+global_load_dwordx4 v[4:7], ...  // issue during MFMA latency
+s_waitcnt vmcnt(0)               // loads should be complete by now
+v_mfma_f32_32x32x8_bf16 a[0:15], v[0:3], v[4:7], a[0:15]  // next MFMA
 ```
 
 ---
 
-## MFMA 依赖解析规则（CDNA4，ISA Table 38）
+## MFMA Dependency Resolution Rules (CDNA4, ISA Table 38)
 
-以下为 **CDNA4 ISA 文档依赖表（Table 38）** 中与本仓库 agent 调度相关的摘录：用于判断两条指令之间需插入多少 **NOP**（或等价独立工作），避免 RAW/WAR 冒险。数值与具体 **MFMA 变体**有关；无转发时需按最大间隔规划 ILP。
+The following is an excerpt from the **CDNA4 ISA documentation dependency table (Table 38)** relevant to agent scheduling in this repository: used to determine how many **NOPs** (or equivalent independent work) must be inserted between two instructions to avoid RAW/WAR hazards. Values depend on the specific **MFMA variant**; without forwarding, plan ILP for the maximum interval.
 
-| 场景 | NOP 要求 |
-|------|----------|
-| 非 MFMA 的 VALU 写入某 VGPR → MFMA 读取**同一** VGPR | **2**（需 2 个 NOP） |
-| MFMA 写入 → **同一** MFMA 作为 **SrcC**（累加，**完全相同** opcode） | **0**（支持 forwarding） |
-| MFMA 写入 → **不同** MFMA 作为 SrcA/B 读 | **5 / 8 / 12 / 20**（依 MFMA 变体，**无** forwarding） |
-| MFMA 写入 → VALU / VM / LDS / FLAT 读**重叠目的**寄存器 | **5 / 8 / 12 / 20** |
-| SGEMM 写入 → SGEMM 读 SrcC（同一目的） | **0**（forwarding） |
-| `V_CMPX` 写 **EXEC** → MFMA | **4**（无 exec mask forwarding） |
-| XDL / SMFMAC 读 SrcC → VALU 写（WAR） | **1 / 3 / 7 / 15**（依变体） |
+| Scenario | NOP Requirement |
+|----------|-----------------|
+| Non-MFMA VALU writes to a VGPR -> MFMA reads the **same** VGPR | **2** (need 2 NOPs) |
+| MFMA writes -> **same** MFMA reads as **SrcC** (accumulation, **exactly same** opcode) | **0** (forwarding supported) |
+| MFMA writes -> **different** MFMA reads as SrcA/B | **5 / 8 / 12 / 20** (depends on MFMA variant, **no** forwarding) |
+| MFMA writes -> VALU / VM / LDS / FLAT reads **overlapping destination** registers | **5 / 8 / 12 / 20** |
+| SGEMM writes -> SGEMM reads SrcC (same destination) | **0** (forwarding) |
+| `V_CMPX` writes **EXEC** -> MFMA | **4** (no exec mask forwarding) |
+| XDL / SMFMAC reads SrcC -> VALU writes (WAR) | **1 / 3 / 7 / 15** (depends on variant) |
 
-**对 agent 的含义**：
+**Implications for the agent**:
 
-1. **背对背 MFMA 累加**（同 opcode、SrcC 链）：可利用 **0 NOP** 转发，但仍需满足其它 hazard（如 LDS/VMEM）。
-2. **切换 SrcA/B 来源**或 **MFMA 与 VALU/LDS 混排**：必须按上表插入足够 **独立指令**（或 `s_nop`），不能假设与 SrcC 相同。
-3. 与 **`V_CMPX` 修改 EXEC** 相邻的 MFMA：预留 **4 NOP** 级间隔。
-4. 设计 **8-wave ping-pong**、**sched_group_barrier** 时，应用上述规则校验内层展开是否足够「填满」流水线。
+1. **Back-to-back MFMA accumulation** (same opcode, SrcC chaining): Can leverage **0 NOP** forwarding, but other hazards (e.g., LDS/VMEM) must still be satisfied.
+2. **Switching SrcA/B sources** or **interleaving MFMA with VALU/LDS**: Must insert sufficient **independent instructions** (or `s_nop`) per the table above -- do not assume the same behavior as SrcC.
+3. **MFMA adjacent to `V_CMPX` modifying EXEC**: Reserve **4 NOP**-level spacing.
+4. When designing **8-wave ping-pong**, **sched_group_barrier** patterns, apply the above rules to verify whether the inner unrolling is sufficient to "fill" the pipeline.
 
-> 完整矩阵以 AMD CDNA4 ISA PDF 为准；不同 `v_mfma_*` / `v_smfmac_*` 形状对应不同 NOP 列。
+> The complete matrix is in the AMD CDNA4 ISA PDF; different `v_mfma_*` / `v_smfmac_*` shapes correspond to different NOP columns.

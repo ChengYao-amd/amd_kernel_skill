@@ -1,27 +1,27 @@
-# Kernel 参考实现（生产级模式摘录）
+# Kernel Reference Implementations (Production-Grade Pattern Excerpts)
 
-本文档从 CK、AITER、ROCm CDNA4 FP8 GEMM 博文等来源整理**可落地的关键内层循环与 API 用法**，供 agent 直接对照实现与调优。正文为中文，代码与标识符为 English。
+This document compiles **actionable key inner-loop patterns and API usage** from sources such as CK, AITER, and ROCm CDNA4 FP8 GEMM blog posts, for agents to directly reference during implementation and tuning. Body text is in English, code and identifiers are in English.
 
-> **说明**：下列片段为教学/移植用「关键路径」代码；完整可编译工程需补齐类型、`__launch_bounds__`、grid 划分与边界检查。性能数字来自博文/厂商基准（M=N=K=4096，CDNA4），实际以 profile 为准。
-
----
-
-## 目录
-
-1. [Vector Add（HIP — 最小参考）](#vector-addhip--最小参考)
-2. [FP8 GEMM with MFMA（LDS 分块 + 向量化 load + double buffer）](#fp8-gemm-with-mfma)
-3. [buffer_load_lds：Global→LDS 直达](#buffer_load_ldsgloballds-直达)
-4. [LDS XOR Swizzle（消除 bank conflict）](#lds-xor-swizzle消除-bank-conflict)
-5. [8-Wave Ping-Pong 调度](#8-wave-ping-pong-调度)
-6. [RMSNorm（AITER Triton，persistent + blocked）](#rmsnormaiter-tritonpersistent--blocked)
-7. [Fused MoE + SiLU（AITER Triton）](#fused-moe--siluaiter-triton)
-8. [Wavefront-aware Reduction（含 AGPR 注记）](#wavefront-aware-reduction含-agpr-注记)
+> **Note**: The snippets below are "critical path" code for educational/porting purposes; a complete compilable project requires adding types, `__launch_bounds__`, grid partitioning, and boundary checks. Performance numbers are from blog posts/vendor benchmarks (M=N=K=4096, CDNA4); actual results should be based on profiling.
 
 ---
 
-## Vector Add（HIP — 最小参考）
+## Table of Contents
 
-保留为最小 HIP kernel 示例，不涉及矩阵核心。
+1. [Vector Add (HIP -- Minimal Reference)](#vector-addhip--minimal-reference)
+2. [FP8 GEMM with MFMA (LDS Tiling + Vectorized Load + Double Buffer)](#fp8-gemm-with-mfma)
+3. [buffer_load_lds: Global->LDS Direct Path](#buffer_load_ldsgloballds-direct-path)
+4. [LDS XOR Swizzle (Eliminating Bank Conflicts)](#lds-xor-swizzleeliminating-bank-conflicts)
+5. [8-Wave Ping-Pong Scheduling](#8-wave-ping-pong-scheduling)
+6. [RMSNorm (AITER Triton, persistent + blocked)](#rmsnormaiter-tritonpersistent--blocked)
+7. [Fused MoE + SiLU (AITER Triton)](#fused-moe--siluaiter-triton)
+8. [Wavefront-aware Reduction (with AGPR Notes)](#wavefront-aware-reductionwith-agpr-notes)
+
+---
+
+## Vector Add (HIP -- Minimal Reference)
+
+Retained as a minimal HIP kernel example, does not involve matrix cores.
 
 ```cpp
 __global__ void vector_add(const float* A, const float* B, float* C, int N) {
@@ -32,19 +32,19 @@ __global__ void vector_add(const float* A, const float* B, float* C, int N) {
 }
 ```
 
-**优化关键词**：coalesced global access，occupancy。
+**Optimization Keywords**: coalesced global access, occupancy.
 
 ---
 
 ## FP8 GEMM with MFMA
 
-**目标**：在 CDNA4 上使用 `fp8` 输入、`f32` 累加，通过 LDS 分块、**16 字节/线程**向量化 load、双缓冲与 MFMA 饱和算力。
+**Goal**: On CDNA4, use `fp8` inputs and `f32` accumulation, achieving peak compute utilization through LDS tiling, **16 bytes/thread** vectorized load, double buffering, and MFMA saturation.
 
-**所用指令**：`__builtin_amdgcn_mfma_f32_16x16x128_fp8_fp8`（每 wave 一次处理 K=128 的 fp8 块，与布局约定一致时使用）。
+**Instructions Used**: `__builtin_amdgcn_mfma_f32_16x16x128_fp8_fp8` (processes a K=128 fp8 block per wave, used when layout conventions are met).
 
-**关键技术**：LDS tiling；**vectorized fp8×16 load**（`uint4`/`vector_size(16)`）；**double-buffer LDS**（`cur`/`nxt` 乒乓）；可选 **XOR swizzle**、**buffer_load_lds**、**8-wave ping-pong**（见后文）。
+**Key Techniques**: LDS tiling; **vectorized fp8x16 load** (`uint4`/`vector_size(16)`); **double-buffer LDS** (`cur`/`nxt` ping-pong); optional **XOR swizzle**, **buffer_load_lds**, **8-wave ping-pong** (see later sections).
 
-### 向量化 FP8×16 load（Global→寄存器→LDS 或直写 LDS 前的寄存器侧）
+### Vectorized FP8x16 Load (Global->Register->LDS or Register-Side Before Direct LDS Write)
 
 ```cpp
 using fp8_t = _Float16;  // placeholder: use ROCm fp8e4m3 type in project
@@ -59,7 +59,7 @@ static inline __device__ fp8x16_t load_fp8x16_u4(const char* p) {
 // const fp8x16_t a_vec = load_fp8x16_u4(A_base + row * lda + k0);
 ```
 
-### LDS 双缓冲骨架（与 MFMA 内层交错）
+### LDS Double Buffer Skeleton (Interleaved with MFMA Inner Loop)
 
 ```cpp
 // Ping-pong: two slots for A and B tiles
@@ -86,9 +86,9 @@ int cur = 0, nxt = 1;
 // }
 ```
 
-### 关键 MFMA 调用（编译器内置）
+### Key MFMA Call (Compiler Built-in)
 
-内层在布局满足 CK/博文 lane 映射时，累加器与 A/B 向量由编译器绑定到 MFMA。典型形式（参数依子块布局而定，见 LLVM/ROCm 文档）：
+In the inner loop, when the layout satisfies CK/blog post lane mapping, the accumulator and A/B vectors are bound to MFMA by the compiler. Typical form (parameters depend on sub-block layout, see LLVM/ROCm docs):
 
 ```cpp
 using fp8x16 = char __attribute__((vector_size(16)));
@@ -101,17 +101,17 @@ __device__ inline float4 mfma_fp8_16x16x128(
 }
 ```
 
-**性能标注（博文，M=N=K=4096）**：朴素 ~1.15 TFLOP/s → LDS tile ~4.8 → MFMA+向量化 load ~337 → +Global→LDS ~507 → +swizzle/double buffer ~1166 → 8-wave 最优 ~2288 TFLOP/s（与 tile 与占用强相关）。
+**Performance Annotations (blog post, M=N=K=4096)**: Naive ~1.15 TFLOP/s -> LDS tile ~4.8 -> MFMA+vectorized load ~337 -> +Global->LDS ~507 -> +swizzle/double buffer ~1166 -> 8-wave optimal ~2288 TFLOP/s (strongly correlated with tile size and occupancy).
 
-**优化技术名称**：MFMA FP8 矩阵核心；LDS blocking；software pipelining（double buffer）；vectorized global load；bank conflict avoidance（XOR swizzle）；multi-wave ping-pong。
+**Optimization Technique Names**: MFMA FP8 matrix core; LDS blocking; software pipelining (double buffer); vectorized global load; bank conflict avoidance (XOR swizzle); multi-wave ping-pong.
 
 ---
 
-## buffer_load_lds：Global→LDS 直达
+## buffer_load_lds: Global->LDS Direct Path
 
-**要点**：使用 `llvm.amdgcn.raw.buffer.load.lds` 把数据从 global **直接写入 LDS**，减少 VGPR 压力（不经全向量寄存器文件搬运）。CDNA4（gfx950）上每 lane 可达 128-bit；旧架构每 lane 可能仅 32-bit，需查 ISA/CK 分支。
+**Key Points**: Uses `llvm.amdgcn.raw.buffer.load.lds` to write data from global **directly into LDS**, reducing VGPR pressure (bypasses the full vector register file transfer). On CDNA4 (gfx950) each lane can handle up to 128-bit; older architectures may only handle 32-bit per lane, check ISA/CK branches.
 
-### LLVM intrinsic 声明
+### LLVM Intrinsic Declaration
 
 ```cpp
 using i32x4 = int32_t __attribute__((ext_vector_type(4)));
@@ -129,7 +129,7 @@ llvm_amdgcn_raw_buffer_load_lds(
     __asm("llvm.amdgcn.raw.buffer.load.lds");
 ```
 
-### `make_wave_buffer_resource()`（CK 风格）
+### `make_wave_buffer_resource()` (CK Style)
 
 ```cpp
 struct __attribute__((packed)) buffer_resource {
@@ -145,7 +145,7 @@ __device__ inline i32x4 make_wave_buffer_resource(
 }
 ```
 
-### Inline asm：`buffer_load_dwordx4 ... lds`（gfx950）
+### Inline asm: `buffer_load_dwordx4 ... lds` (gfx950)
 
 ```cpp
 template <unsigned num_dwords>
@@ -166,21 +166,21 @@ __device__ void async_buffer_load_dwordxn_lds(
 }
 ```
 
-**高层调用（逻辑）**：
+**High-Level Call (Logical)**:
 
 ```cpp
 // llvm_amdgcn_raw_buffer_load_lds(rsrc, (as3_uint32_ptr)smem, bytes, v_offset, soffset, 0, coherence);
 ```
 
-**优化技术名称**：raw buffer load；global-to-LDS shortcut；降低 VGPR 占用。
+**Optimization Technique Names**: raw buffer load; global-to-LDS shortcut; reduced VGPR occupancy.
 
 ---
 
-## LDS XOR Swizzle（消除 bank conflict）
+## LDS XOR Swizzle (Eliminating Bank Conflicts)
 
-**要点**：CDNA4 上 `ds_read_b128` 等宽向量读在 64 bank 上分多 phase；对 **16×128** 一类 tile，对列索引做 **XOR remap**，使同 phase 内线程访问不同 bank。映射为**自逆**，读写用同一公式即可。
+**Key Points**: On CDNA4, wide vector reads like `ds_read_b128` span multiple phases across 64 banks; for tiles such as **16x128**, applying **XOR remap** to the column index ensures threads within the same phase access different banks. The mapping is **self-inverse**, so the same formula works for both reads and writes.
 
-### XOR 公式（16B 列对齐场景，来自博文/CK 摘录）
+### XOR Formula (16B Column-Aligned Scenario, from Blog Post/CK Excerpt)
 
 ```cpp
 __device__ __host__ int swizzle_col(int row, int col) {
@@ -193,20 +193,20 @@ __device__ __host__ int swizzle_col(int row, int col) {
 // LDS read:   same formula on (row, logical_col)
 ```
 
-### CK 中的 SwizzleA / SwizzleB 类型（概念）
+### SwizzleA / SwizzleB Types in CK (Conceptual)
 
-CK 在 `WarpGemm` 层用模板区分是否在 K 维迭代上启用 **SwizzleA** 或 **SwizzleB**（及 `TransposedCDistribution`），例如：
+CK uses templates at the `WarpGemm` layer to differentiate whether **SwizzleA** or **SwizzleB** (and `TransposedCDistribution`) is enabled on the K-dimension iteration, for example:
 
-- `WarpGemmMfmaF16F16F32M32N32K8SwizzleA` — A 侧 swizzle。
-- `WarpGemmMfmaFp8Fp8F32M32N32K32SwizzleBTransposedCDistribution<4>` — B 侧 swizzle + factor=4（FP8 32×32×32）。
+- `WarpGemmMfmaF16F16F32M32N32K8SwizzleA` -- A-side swizzle.
+- `WarpGemmMfmaFp8Fp8F32M32N32K32SwizzleBTransposedCDistribution<4>` -- B-side swizzle + factor=4 (FP8 32x32x32).
 
-**优化技术名称**：XOR bank swizzle；phase-balanced LDS access；SwizzleA/SwizzleB policy。
+**Optimization Technique Names**: XOR bank swizzle; phase-balanced LDS access; SwizzleA/SwizzleB policy.
 
 ---
 
-## 8-Wave Ping-Pong 调度
+## 8-Wave Ping-Pong Scheduling
 
-**要点**：8 个 wave 分成两组（`wave_m = waveid / 4`），通过 **barrier** 与 **优先级** 让一组做 **memory**，另一组做 **compute**，重叠 MFMA 与异步搬运。
+**Key Points**: 8 waves are split into two groups (`wave_m = waveid / 4`), using **barriers** and **priorities** so that one group performs **memory** operations while the other performs **compute**, overlapping MFMA with async transfers.
 
 ### `s_setprio` / `sched_barrier` / `sched_group_barrier`
 
@@ -217,26 +217,26 @@ __builtin_amdgcn_s_setprio(1);
 __builtin_amdgcn_sched_barrier(0);   // hard fence: no reorder across
 __builtin_amdgcn_s_setprio(0);
 
-// Fine-grained: issue groups — 0x008 = MFMA class, 0x004 = SALU
+// Fine-grained: issue groups -- 0x008 = MFMA class, 0x004 = SALU
 __builtin_amdgcn_sched_group_barrier(0x008, 1, 0);  // one MFMA group
 __builtin_amdgcn_sched_group_barrier(0x004, 1, 0);  // one SALU group
 ```
 
-### CK hot-loop scheduler 片段（概念）
+### CK Hot-Loop Scheduler Fragment (Conceptual)
 
 ```cpp
 auto hot_loop_scheduler = [&]() {
     __builtin_amdgcn_sched_group_barrier(0x008, 1, 0);
     __builtin_amdgcn_sched_group_barrier(0x008, 1, 0);
     __builtin_amdgcn_sched_group_barrier(0x008, 1, 0);
-    // s_waitcnt_lgkm<4>();  // keep LDS loads in flight — CK helper
+    // s_waitcnt_lgkm<4>();  // keep LDS loads in flight -- CK helper
     __builtin_amdgcn_sched_group_barrier(0x004, 1, 0);
     // ... more MFMA sched_group_barrier(0x008,1,0) ...
     __builtin_amdgcn_sched_barrier(0);
 };
 ```
 
-### Wave 分组与 barrier 交错（博文风格）
+### Wave Grouping and Barrier Interleaving (Blog Post Style)
 
 ```cpp
 int waveid = threadIdx.x / 64;
@@ -250,13 +250,13 @@ __builtin_amdgcn_s_barrier();
 // ... swap roles ...
 ```
 
-**优化技术名称**：wave priority (`s_setprio`)；scheduling barriers；MFMA/SALU/LDS 交错；8-wave occupancy pattern。
+**Optimization Technique Names**: wave priority (`s_setprio`); scheduling barriers; MFMA/SALU/LDS interleaving; 8-wave occupancy pattern.
 
 ---
 
-## RMSNorm（AITER Triton：persistent + blocked）
+## RMSNorm (AITER Triton: persistent + blocked)
 
-**要点**：`tl.range(row_start, n_rows, NUM_PRGMS)` 做 **persistent** 调度；`USE_BLOCKED` 为大 `n_cols` 多 block 两遍扫描；小 `n_cols` 单 block 一遍 `rsqrt` + scale。
+**Key Points**: `tl.range(row_start, n_rows, NUM_PRGMS)` implements **persistent** scheduling; `USE_BLOCKED` enables multi-block two-pass scan for large `n_cols`; small `n_cols` uses single-block one-pass `rsqrt` + scale.
 
 ```python
 @triton.jit
@@ -309,15 +309,15 @@ def _rms_norm_kernel(
                      rms_norm.to(output_ptr.type.element_ty), mask=mask)
 ```
 
-**性能**：依赖序列长度与宽度；优化来自 persistent grid、`tl.multiple_of(..., (16,))` 向量化与两路径分支。
+**Performance**: Depends on sequence length and width; optimization comes from persistent grid, `tl.multiple_of(..., (16,))` vectorization, and two-path branching.
 
-**优化技术名称**：persistent scheduling；blocked reduction；two-pass normalize；cache modifier `.cg`。
+**Optimization Technique Names**: persistent scheduling; blocked reduction; two-pass normalize; cache modifier `.cg`.
 
 ---
 
-## Fused MoE + SiLU（AITER Triton）
+## Fused MoE + SiLU (AITER Triton)
 
-**要点**：`remap_xcd` 重映射 `program_id` 改善跨 chiplet 的 L2 局部性；`pid_grid` + `GROUP_SIZE_M` 控制 tile 遍历；SiLU 路径对 gate/up **列交错**（`offs_bn`）。下列为 **PID 映射 + 列寻址 + GEMM 累加 + SiLU + store** 核心；`a_ptrs` / `b_ptrs` / `c_ptrs` 及 INT4/INT8/FP8 解包见 `aiter/.../moe_op_silu_fused.py` 全文。
+**Key Points**: `remap_xcd` remaps `program_id` to improve L2 locality across chiplets; `pid_grid` + `GROUP_SIZE_M` controls tile traversal; the SiLU path interleaves gate/up **columns** (`offs_bn`). Below is the core of **PID mapping + column addressing + GEMM accumulation + SiLU + store**; `a_ptrs` / `b_ptrs` / `c_ptrs` and INT4/INT8/FP8 unpacking details are in `aiter/.../moe_op_silu_fused.py` full source.
 
 ```python
 @triton.jit
@@ -377,15 +377,15 @@ def _fused_moe_silu_kernel_gptq_awq(
     tl.store(c_ptrs, accumulator.to(compute_type), mask=token_mask[:, None])
 ```
 
-**所用指令层**：Triton `tl.dot` 降至后端 MFMA（类型依赖）。
+**Instruction Layer Used**: Triton `tl.dot` lowers to backend MFMA (type-dependent).
 
-**优化技术名称**：XCD remap；L2-friendly tile ordering；fused SiLU；quantized GEMM（INT4/INT8/FP8 路径在完整源码中）。
+**Optimization Technique Names**: XCD remap; L2-friendly tile ordering; fused SiLU; quantized GEMM (INT4/INT8/FP8 paths in full source).
 
 ---
 
-## Wavefront-aware Reduction（含 AGPR 注记）
+## Wavefront-aware Reduction (with AGPR Notes)
 
-AMD wavefront = 64 lanes；warp shuffle 常用 `__shfl_xor`。多 wave block 需 **shared memory** 二次归约。
+AMD wavefront = 64 lanes; warp shuffle commonly uses `__shfl_xor`. Multi-wave blocks require **shared memory** for a second-level reduction.
 
 ```cpp
 __device__ float warp_reduce_sum(float val) {
@@ -414,15 +414,15 @@ __global__ void block_reduce(const float* input, float* output, int N) {
 }
 ```
 
-**AGPR 注记**：在 **MFMA 累加链**中，生产库常把累加器放在 **AGPR**（`asm` 中 `"a"` 约束或 CK `DISPATCH_MFMA_` 的 `+a`），与 VGPR 分离，便于双缓冲与 **8-wave** 方案中一组 wave 用 VGPR、另一组用 AGPR 交错。纯 reduction 如上通常仅用 VGPR；若与 MFMA 同 kernel 融合，需对照 ISA 的 **SrcC 转发与 NOP 间隔**（见 `isa/scheduling-pipeline.md`）。
+**AGPR Notes**: In **MFMA accumulation chains**, production libraries commonly place accumulators in **AGPR** (`"a"` constraint in `asm` or CK `DISPATCH_MFMA_`'s `+a`), separated from VGPR, facilitating double buffering and the **8-wave** scheme where one wave group uses VGPR and the other uses AGPR in an interleaved fashion. Pure reductions like the above typically only use VGPR; if fused with MFMA in the same kernel, you need to account for ISA-level **SrcC forwarding and NOP intervals** (see `isa/scheduling-pipeline.md`).
 
-**优化技术名称**：wave shuffle reduction；hierarchical block reduce；AGPR accumulator（与 MFMA 联用时）。
+**Optimization Technique Names**: wave shuffle reduction; hierarchical block reduce; AGPR accumulator (when used with MFMA).
 
 ---
 
-## 参考与延伸阅读
+## References and Further Reading
 
-- CK：`composable_kernel` — `amd_buffer_addressing.hpp`，`gemm_pipeline_ag_bg_cr_comp_async_eight_waves.hpp`。
-- AITER：`rmsnorm.py`，`moe_op_silu_fused.py`。
-- ROCm Blog：[FP8 GEMM Optimization on AMD CDNA4](https://rocm.blogs.amd.com/software-tools-optimization/cdna4-gemm-kernels/README.html)
-- 更细 MFMA 调度与 NOP：`references/isa/scheduling-pipeline.md`；内联封装：`references/isa/inline-asm-patterns.md`。
+- CK: `composable_kernel` -- `amd_buffer_addressing.hpp`, `gemm_pipeline_ag_bg_cr_comp_async_eight_waves.hpp`.
+- AITER: `rmsnorm.py`, `moe_op_silu_fused.py`.
+- ROCm Blog: [FP8 GEMM Optimization on AMD CDNA4](https://rocm.blogs.amd.com/software-tools-optimization/cdna4-gemm-kernels/README.html)
+- Detailed MFMA scheduling and NOPs: `references/isa/scheduling-pipeline.md`; inline wrappers: `references/isa/inline-asm-patterns.md`.

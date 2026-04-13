@@ -1,106 +1,106 @@
-# AITER（AMD Inference Toolkit for Efficient Runtime）算子与工程参考
+# AITER (AMD Inference Toolkit for Efficient Runtime) Operator & Engineering Reference
 
-**AITER**（仓库名多为 `aiter`）是 AMD 侧 **集中维护的高性能 AI 算子库**：底层实现可来自 **Triton、Composable Kernel（CK）、inline assembly** 等；面向 **Python / C++ API**，既覆盖 **推理**，也包含 **训练** 与 **GEMM + 通信** 等组合场景。集成方通常把 AITER 作为 **统一算子来源**，再接入自有框架。
+**AITER** (repository commonly named `aiter`) is AMD's **centrally maintained high-performance AI operator library**: underlying implementations may come from **Triton, Composable Kernel (CK), inline assembly**, etc.; exposing **Python / C++ APIs** that cover **inference**, as well as **training** and combined scenarios such as **GEMM + communication**. Integrators typically adopt AITER as a **unified operator source** and plug it into their own frameworks.
 
-本文档按 **源码与配置布局** 归纳 **算子类别、精度与架构差异、调参入口**，便于在自定义 kernel 之前评估是否已有成熟实现。
+This document organizes **operator categories, precision and architecture differences, and tuning entry points** according to the **source code and configuration layout**, to help evaluate whether a mature implementation already exists before writing a custom kernel.
 
-## 1. 仓库与运行方式（官方 README 摘要）
+## 1. Repository & Execution (Official README Summary)
 
-- **获取**：`git clone --recursive https://github.com/ROCm/aiter.git`（子模块含第三方与内核依赖）。
-- **安装**：`python3 setup.py develop` 或 `pip install -e .`。
-- **可选**：**FlyDSL** 用于部分 **混合精度 MoE**（如 **A4W4**）；未安装时可回退 **CK** 路径。**Iris** 用于 **Triton 通信**（见 `requirements-triton-comms.txt` / `docs/triton_comms.md`）。
-- **验证**：`python3 op_tests/test_<op>.py`（具体脚本以 `op_tests/` 目录为准）。
+- **Obtain**: `git clone --recursive https://github.com/ROCm/aiter.git` (submodules include third-party and kernel dependencies).
+- **Install**: `python3 setup.py develop` or `pip install -e .`.
+- **Optional**: **FlyDSL** is used for some **mixed-precision MoE** (e.g., **A4W4**); falls back to the **CK** path when not installed. **Iris** is used for **Triton communication** (see `requirements-triton-comms.txt` / `docs/triton_comms.md`).
+- **Verify**: `python3 op_tests/test_<op>.py` (refer to the `op_tests/` directory for specific scripts).
 
-下列 **API 片段仅为说明层次**；真实函数名与参数请查阅 **`aiter` Python 包导出** 与 **`op_tests`** 中的用法。
+The **API snippets below are for illustration of the hierarchy only**; for actual function names and parameters, consult the **`aiter` Python package exports** and usage in **`op_tests`**.
 
 ```python
-# 层次示意：以仓库内实际导出为准
+# Hierarchy illustration: refer to actual exports in the repository
 # import aiter
 # out = aiter.<op_name>(tensors..., **kwargs)
 ```
 
-## 2. 算子分类（从模块与命名归纳）
+## 2. Operator Categories (Derived from Module & Naming Conventions)
 
-以下为从 **目录与命名** 可系统检索到的 **操作族**；同一族内常有 **fwd/bwd**、**varlen**、**量化位宽**、**Gluon / ragged** 等变体。
+The following are **operation families** systematically discoverable from **directories and naming**; within the same family there are often variants such as **fwd/bwd**, **varlen**, **quantization bit-widths**, **Gluon / ragged**, etc.
 
-| # | 类别 | 覆盖内容（关键词） |
-|---|------|-------------------|
-| 1 | **MHA / Flash Attention** | `mha_fwd` / `mha_bwd`，`fmha_v3_fwd` / `fmha_v3_bwd`，**varlen**，**fp8_pertensor**，**batch_prefill**；实现可组合 **CK + Triton**。 |
-| 2 | **GEMM** | `gemm_a16w16`，`gemm_a8w8`（**asm / CK / tune**），`gemm_a8w8_blockscale`，`gemm_a4w4`，**batched_gemm**，**deepgemm** 等。 |
-| 3 | **Paged Attention（PA）** | `pa_fwd_naive` / **asm**，`paged_attention_v1` / **ragged**，**Gluon decode** 相关路径。 |
-| 4 | **Normalization** | `layer_norm`，`layernorm2d`，`rms_norm`，`rmsnorm2d`；常与 **add**、**smoothquant**、**dynamicquant** 等融合。 |
-| 5 | **Activation** | `silu_and_mul`，`scaled_silu_and_mul`，`gelu_and_mul`，`gelu_tanh_and_mul`，`gelu_fast`。 |
-| 6 | **Quantization** | `per_tensor_quant`，`per_token_quant`，`smoothquant`，`dynamic_per_tensor`，**FP4**（如 **per_1x32_f4_quant**），**block quant**，**MXFP4**。 |
-| 7 | **MoE** | `fmoe`，`fmoe_g1u1`，`fmoe_fp8_blockscale_g1u1`，`moe_stage1` / `moe_stage2`，`moe_fused_gate`，`moe_sorting`，`ck_moe_stage1` / `ck_moe_stage2`。 |
-| 8 | **RoPE** | `rope_fwd` / `rope_bwd`，`rope_cached`，`rope_2d`。 |
-| 9 | **KV / Cache / MLA** | `reshape_and_cache`，`concat_and_cache_mla`，`fused_qk_rmsnorm_group_quant` 等。 |
-| 10 | **Collective / Communication** | `all_reduce`，`reduce_scatter`，`all_gather`，`custom_all_reduce`，`quick_all_reduce`（部分依赖 **Triton + Iris** 栈）。 |
-| 11 | **Sampling** | `greedy_sample`，`random_sample`，`topk_softmax`，`top_k_per_row`。 |
-| 12 | **Elementwise** | `add`，`sub`，`mul`，`div`，`sigmoid`，`tanh` 等。 |
+| # | Category | Coverage (Keywords) |
+|---|----------|---------------------|
+| 1 | **MHA / Flash Attention** | `mha_fwd` / `mha_bwd`, `fmha_v3_fwd` / `fmha_v3_bwd`, **varlen**, **fp8_pertensor**, **batch_prefill**; implementations can combine **CK + Triton**. |
+| 2 | **GEMM** | `gemm_a16w16`, `gemm_a8w8` (**asm / CK / tune**), `gemm_a8w8_blockscale`, `gemm_a4w4`, **batched_gemm**, **deepgemm**, etc. |
+| 3 | **Paged Attention (PA)** | `pa_fwd_naive` / **asm**, `paged_attention_v1` / **ragged**, **Gluon decode** related paths. |
+| 4 | **Normalization** | `layer_norm`, `layernorm2d`, `rms_norm`, `rmsnorm2d`; often fused with **add**, **smoothquant**, **dynamicquant**, etc. |
+| 5 | **Activation** | `silu_and_mul`, `scaled_silu_and_mul`, `gelu_and_mul`, `gelu_tanh_and_mul`, `gelu_fast`. |
+| 6 | **Quantization** | `per_tensor_quant`, `per_token_quant`, `smoothquant`, `dynamic_per_tensor`, **FP4** (e.g., **per_1x32_f4_quant**), **block quant**, **MXFP4**. |
+| 7 | **MoE** | `fmoe`, `fmoe_g1u1`, `fmoe_fp8_blockscale_g1u1`, `moe_stage1` / `moe_stage2`, `moe_fused_gate`, `moe_sorting`, `ck_moe_stage1` / `ck_moe_stage2`. |
+| 8 | **RoPE** | `rope_fwd` / `rope_bwd`, `rope_cached`, `rope_2d`. |
+| 9 | **KV / Cache / MLA** | `reshape_and_cache`, `concat_and_cache_mla`, `fused_qk_rmsnorm_group_quant`, etc. |
+| 10 | **Collective / Communication** | `all_reduce`, `reduce_scatter`, `all_gather`, `custom_all_reduce`, `quick_all_reduce` (some depend on the **Triton + Iris** stack). |
+| 11 | **Sampling** | `greedy_sample`, `random_sample`, `topk_softmax`, `top_k_per_row`. |
+| 12 | **Elementwise** | `add`, `sub`, `mul`, `div`, `sigmoid`, `tanh`, etc. |
 
-**README 中的功能表**（MHA、MLA、PA、FusedMoe、QUANT、RMSNORM、LAYERNORM、ROPE、GEMM 等）与上表一致，可作为 **对外沟通** 的简版索引。
+The **feature table in the README** (MHA, MLA, PA, FusedMoe, QUANT, RMSNORM, LAYERNORM, ROPE, GEMM, etc.) is consistent with the table above and can serve as a **simplified index for external communication**.
 
-## 3. FP8 与架构（gfx950 / gfx1250 vs 其它）
+## 3. FP8 & Architecture (gfx950 / gfx1250 vs Others)
 
-AITER 在 **FP8** 路径上区分 **OCP** 与 **非 OCP（FNUZ）** 变体（具体类型名以源码为准）：
+AITER distinguishes between **OCP** and **non-OCP (FNUZ)** variants on **FP8** paths (exact type names are subject to source code):
 
-| 目标架构（示例） | FP8 取向 |
-|------------------|----------|
-| **gfx950**、**gfx1250** | 使用 **E4M3FN**、**E5M2** 等 **OCP** 对齐格式。 |
-| **其它 arch** | 常见 **E4M3FNUZ**、**E5M2FNUZ** 等 **FNUZ** 变体。 |
+| Target Architecture (Examples) | FP8 Orientation |
+|-------------------------------|-----------------|
+| **gfx950**, **gfx1250** | Uses **E4M3FN**, **E5M2**, and other **OCP**-aligned formats. |
+| **Other arch** | Commonly uses **E4M3FNUZ**, **E5M2FNUZ**, and other **FNUZ** variants. |
 
-移植算子或对比 **MI300 vs MI355** 时，应先确认 **dtype 枚举与 tensor layout** 与目标 **ISA / OCP 支持** 一致，再谈性能。
+When porting operators or comparing **MI300 vs MI355**, first confirm that the **dtype enumeration and tensor layout** are consistent with the target **ISA / OCP support** before discussing performance.
 
-## 4. 调优与配置基础设施
+## 4. Tuning & Configuration Infrastructure
 
-| 类型 | 位置（惯例） | 用途 |
-|------|----------------|------|
-| **CSV** | `aiter/configs/*.csv` | **按模型 / 场景** 调好的 **GEMM** 等参数表。 |
-| **JSON** | `aiter/ops/triton/configs/**/*.json` | **Triton kernel** 的 block、split 等 **JSON 配置**。 |
-| **MoE 分档** | 逻辑层常按 **token 规模 M** 分档 | 例如 **small_M**（M 小于 256）、**medium_M**（M 小于 1024）、**large_M**：对应不同专家并行与 kernel 选择。 |
+| Type | Location (Convention) | Purpose |
+|------|----------------------|---------|
+| **CSV** | `aiter/configs/*.csv` | **GEMM** and other parameter tables tuned **per model / scenario**. |
+| **JSON** | `aiter/ops/triton/configs/**/*.json` | **JSON configurations** for **Triton kernel** block, split, etc. |
+| **MoE tiering** | Logic layer commonly tiers by **token count M** | e.g., **small_M** (M < 256), **medium_M** (M < 1024), **large_M**: corresponding to different expert parallelism and kernel selection. |
 
-## 5. Triton GEMM 配置参数（常见字段）
+## 5. Triton GEMM Configuration Parameters (Common Fields)
 
-在 JSON 或 Python 配置中，Triton GEMM 常出现下列 **可调字段**（名称以具体文件为准）：
+In JSON or Python configurations, Triton GEMM commonly features the following **tunable fields** (names subject to the specific file):
 
-| 参数 | 作用 |
-|------|------|
-| `BLOCK_SIZE_M` / `BLOCK_SIZE_N` / `BLOCK_SIZE_K` | Tile 形状。 |
-| `GROUP_SIZE_M` | M 向 **分组**，影响 L2 局部性与 wave 调度。 |
-| `NUM_KSPLIT` / `SPLITK_BLOCK_SIZE` | **K 维切分** 与 **split-K** 块大小，用于大 K 或数值策略。 |
-| `cache_modifier` | 全局 load 的 **cache hint**（如 `ca`、`cg`），与架构及共栖 kernel 有关。 |
+| Parameter | Function |
+|-----------|----------|
+| `BLOCK_SIZE_M` / `BLOCK_SIZE_N` / `BLOCK_SIZE_K` | Tile shape. |
+| `GROUP_SIZE_M` | M-direction **grouping**, affects L2 locality and wave scheduling. |
+| `NUM_KSPLIT` / `SPLITK_BLOCK_SIZE` | **K-dimension splitting** and **split-K** block size, used for large K or numerical strategies. |
+| `cache_modifier` | **Cache hint** for global loads (e.g., `ca`, `cg`), depends on architecture and co-resident kernels. |
 
-## 6. 何时用 AITER、何时写自定义 kernel
+## 6. When to Use AITER vs Writing a Custom Kernel
 
-| 场景 | 建议 |
-|------|------|
-| **标准算子 + 常见 shape + 已支持 dtype** | 优先 **AITER**，并用 **op_tests** 与业务 case 做回归。 |
-| **库中无覆盖的融合 或 特殊 mask/layout** | **自定义 kernel**（CK / Triton / asm），并以 **AITER 最接近子算子** 为性能下界。 |
-| **性能不达标** | 先对照 **CSV/JSON** 是否与当前 **模型 tier、arch、batch** 匹配，再考虑自定义。 |
-| **罕见精度组合** | 先查 **FP8 / INT4 / MXFP4** 分支；若无，则自定义并注意上文 **架构差异** 小节。 |
+| Scenario | Recommendation |
+|----------|----------------|
+| **Standard operator + common shapes + supported dtype** | Prefer **AITER**, and use **op_tests** plus business cases for regression. |
+| **Fusions not covered by the library or special mask/layout** | **Custom kernel** (CK / Triton / asm), using the **closest AITER sub-operator** as the performance lower bound. |
+| **Performance not meeting target** | First check whether the **CSV/JSON** matches the current **model tier, arch, and batch**; then consider custom work. |
+| **Rare precision combinations** | First check **FP8 / INT4 / MXFP4** branches; if absent, write custom and mind the **architecture differences** section above. |
 
-## 7. Benchmark 对比（示意）
+## 7. Benchmark Comparison (Illustrative)
 
-若仓库提供 benchmark 脚本，可采用与官方 **README / docs** 一致的入口；以下为 **模式化** 命令占位：
+If the repository provides benchmark scripts, use entry points consistent with the official **README / docs**; the following is a **templated** command placeholder:
 
 ```bash
-# 以仓库实际脚本为准，例如：
+# Use the actual script from the repository, for example:
 # python scripts/benchmark_kernel.py --kernel my_kernel.py --op attention --baseline aiter
 ```
 
-### DeepSeek-R1 / V3 系列上的 AITER 加速比（公开博文，MI300X）
+### AITER Speedups on DeepSeek-R1 / V3 Series (Public Blog Post, MI300X)
 
-下列为相对未启用 **AITER** 基线的量级（具体模型与批次以原文为准）：
+The following are approximate magnitudes relative to the baseline without **AITER** (specific models and batch sizes per the original text):
 
-| 算子 / 场景 | Speedup |
-|-------------|---------|
-| **MLA decode** | **17×** |
-| **Block-scale fused MoE** | **3×** |
-| **Block-scale GEMM** | **2×** |
-| **MHA prefill** | **14×** |
-| **End-to-end（SGLang，8×MI300X）** | **2.1×**（例如 **6484 → 13704 tok/s**） |
+| Operator / Scenario | Speedup |
+|---------------------|---------|
+| **MLA decode** | **17x** |
+| **Block-scale fused MoE** | **3x** |
+| **Block-scale GEMM** | **2x** |
+| **MHA prefill** | **14x** |
+| **End-to-end (SGLang, 8xMI300X)** | **2.1x** (e.g., **6484 -> 13704 tok/s**) |
 
-## 8. 与 SGLang / vLLM 集成及 PD 分离
+## 8. Integration with SGLang / vLLM and PD Disaggregation
 
 ### SGLang
 
@@ -108,47 +108,111 @@ AITER 在 **FP8** 路径上区分 **OCP** 与 **非 OCP（FNUZ）** 变体（具
 export SGLANG_USE_AITER=1
 ```
 
-可与 **FlyDSL MoE** 等组合（示例）：`AITER_USE_FLYDSL_MOE=1` 及 `--disable-radix-cache --enable-torch-compile` 等，以仓库与场景为准。
+Can be combined with **FlyDSL MoE**, etc. (example): `AITER_USE_FLYDSL_MOE=1` and `--disable-radix-cache --enable-torch-compile`, etc., subject to the repository and scenario.
 
-### vLLM（ROCm）
+### vLLM (ROCm)
 
-总开关：
+Master switch:
 
 ```bash
 export VLLM_ROCM_USE_AITER=1
 ```
 
-在总开关开启时，下列子开关常用于细粒度裁剪（默认值随版本变化，以 **vLLM** 文档为准）：
+With the master switch enabled, the following sub-switches are commonly used for fine-grained control (defaults change across versions; refer to the **vLLM** documentation):
 
-| 环境变量 | 作用 |
-|----------|------|
-| `VLLM_ROCM_USE_AITER_LINEAR` | **Linear** 层 **FP8** 量化 **GEMM** |
-| `VLLM_ROCM_USE_AITER_MOE` | 融合 **MoE** 路由与计算 |
-| `VLLM_ROCM_USE_AITER_RMSNORM` | **RMSNorm** 加速 |
-| `VLLM_ROCM_USE_AITER_MLA` | **MLA**（**DeepSeek** 等） |
-| `VLLM_ROCM_USE_AITER_MHA` | **MHA**（**Llama/Mistral** 等） |
-| `VLLM_ROCM_USE_AITER_FP8BMM` | **MLA** 用 **FP8** **batched matmul** |
-| `VLLM_ROCM_USE_SKINNY_GEMM` | 小 **batch** **skinny GEMM** |
+| Environment Variable | Function |
+|---------------------|----------|
+| `VLLM_ROCM_USE_AITER_LINEAR` | **Linear** layer **FP8** quantized **GEMM** |
+| `VLLM_ROCM_USE_AITER_MOE` | Fused **MoE** routing and computation |
+| `VLLM_ROCM_USE_AITER_RMSNORM` | **RMSNorm** acceleration |
+| `VLLM_ROCM_USE_AITER_MLA` | **MLA** (**DeepSeek**, etc.) |
+| `VLLM_ROCM_USE_AITER_MHA` | **MHA** (**Llama/Mistral**, etc.) |
+| `VLLM_ROCM_USE_AITER_FP8BMM` | **MLA** with **FP8** **batched matmul** |
+| `VLLM_ROCM_USE_SKINNY_GEMM` | Small **batch** **skinny GEMM** |
 
-**DeepSeek MLA** 使用 **vLLM** 时常需 **`--block-size 1`**，否则可能报错。
+**DeepSeek MLA** with **vLLM** often requires **`--block-size 1`**; otherwise it may throw errors.
 
-### Disaggregated serving（Prefill / Decode 分离）
+### Disaggregated Serving (Prefill / Decode Separation)
 
-**SGLang** 支持 **PD disaggregation**，将 **prefill** 与 **decode** 分到不同进程/**GPU**。典型 **launch_server** 相关参数包括：
+**SGLang** supports **PD disaggregation**, separating **prefill** and **decode** into different processes/**GPUs**. Typical **launch_server** related parameters include:
 
-| 参数 | 含义 |
-|------|------|
-| `--disaggregation-mode` | `prefill` 或 `decode` |
-| `--disaggregation-transfer-backend` | **KV** 传输后端（如 **mooncake**、**nixl**） |
-| `--disaggregation-ib-device` | **InfiniBand** / **RoCE** 设备名 |
-| `--disaggregation-bootstrap-port` | **Bootstrap** 端口（爬取默认 **8998**） |
-| `--base-gpu-id` | 多卡上起始 **GPU** 索引（**decode** 侧常用） |
-| `--model-path` | 模型路径（两侧均需） |
-| `--port` / `--host` | 服务监听地址与端口 |
+| Parameter | Meaning |
+|-----------|---------|
+| `--disaggregation-mode` | `prefill` or `decode` |
+| `--disaggregation-transfer-backend` | **KV** transfer backend (e.g., **mooncake**, **nixl**) |
+| `--disaggregation-ib-device` | **InfiniBand** / **RoCE** device name |
+| `--disaggregation-bootstrap-port` | **Bootstrap** port (crawled default **8998**) |
+| `--base-gpu-id` | Starting **GPU** index on multi-card setups (commonly used on the **decode** side) |
+| `--model-path` | Model path (required on both sides) |
+| `--port` / `--host` | Service listening address and port |
 
-前端常配合 **`python -m sglang_router.launch_router --pd-disaggregation --prefill ... --decode ...`**。细粒度线程与超时见 **`SGLANG_DISAGGREGATION_*`** 等环境变量（**thread pool**、**queue**、**heartbeat** 等）。
+The frontend is often paired with **`python -m sglang_router.launch_router --pd-disaggregation --prefill ... --decode ...`**. Fine-grained thread and timeout settings are in **`SGLANG_DISAGGREGATION_*`** environment variables (**thread pool**, **queue**, **heartbeat**, etc.).
 
-## 9. 与 CK 文档的衔接
+## 9. DeepSeek-R1 / V3 Optimized Operators (Detailed)
 
-- **CK tile / pipeline / GemmConfig\*** 细节：[[ck-tile-tuning.md|ck-tile-tuning]]、[[ck-programming-model.md|ck-programming-model]]
-- AITER 中大量 GEMM / FMHA 仍依赖 **CK** 实现；阅读 **ck_tile** 有助于理解 **调参边界与瓶颈类型**。
+The following table details the specific AITER operator backends used for DeepSeek-R1/V3 inference, as disclosed in AMD blog posts. These represent the highest-performance operator selections for this model family on MI300X.
+
+| Component | Backend | Description |
+|-----------|---------|-------------|
+| **MoE Top-K Routing** | HIP kernel | Fused biased grouped top-k selection |
+| **MoE Sorting** | CK | MoE alignment and sort |
+| **MoE FP8 Blockscale** | Assembly | Fused FP8 blockscale group GEMM (best perf on AMD) |
+| **FP8 GEMM** | CK (pre-shuffle) | Block-scale with 1x128 activation scales, 128x128 weight scales |
+| **MLA Decode** | Assembly | Latent attention (head dim 576/512) with weight absorption |
+| **MHA Prefill** | CK | Multi-head attention (head dim 192/128) |
+| **MLA Prefill** | Assembly | Latent attention (limited to q_extend < 160) |
+| **Custom AllReduce** | HIP | Optimized for MI300X inter-chip communication |
+
+### Key API Imports
+
+```python
+from aiter import biased_grouped_topk
+from aiter.fused_moe_bf16_asm import asm_moe
+from aiter import gemm_a8w8_blockscale_wpreshuffle_CK
+from aiter.mla import mla_decode_fwd, mla_prefill_fwd
+```
+
+### Weight Pre-shuffle for GEMM
+
+For pre-shuffled GEMM paths (used in FP8 block-scale inference), weights must be rearranged into consumption order at model load time:
+
+```python
+from aiter.ops.shuffle import shuffle_weight
+layer.weight.data = shuffle_weight(layer.weight.contiguous(), (16, 16))
+```
+
+This eliminates decode-path overhead from weight layout transformation at runtime.
+
+### DeepSeek-R1 Performance Impact (batch=64, input=512, output=32, TP=8)
+
+| Metric | Before AITER | After AITER | Improvement |
+|--------|-------------|-------------|-------------|
+| Prefill latency | 3.13s | 1.51s | **-52%** |
+| Decode latency (median) | 53ms | 28ms | **-47%** |
+| Total throughput | 7,332 tok/s | 14,636 tok/s | **+100%** |
+
+---
+
+## 10. FlyDSL MoE Integration
+
+AITER optionally uses **FlyDSL** for mixed-precision MoE kernels (e.g., A4W4, W4A16). When FlyDSL is not installed, AITER falls back to the CK path.
+
+### Environment Variables for FlyDSL MoE
+
+| Variable | Purpose |
+|----------|---------|
+| `AITER_USE_FLYDSL_MOE=1` | Enable FlyDSL for MoE kernels |
+| `AITER_USE_FLYDSL_MOE_STAGE1=1` | FlyDSL for MoE stage 1 (gate/up projection) |
+| `AITER_USE_FLYDSL_MOE_STAGE2=1` | FlyDSL for MoE stage 2 (down projection) |
+| `FLYDSL_W4A16_HYBRID=w2_bf16` | Mixed precision: W4A16 for stage 1, BF16 for stage 2 |
+
+See `libraries/flydsl-reference.md` for detailed FlyDSL documentation and benchmarks.
+
+---
+
+## 11. Connection to CK Documentation
+
+- **CK tile / pipeline / GemmConfig\*** details: [[ck-tile-tuning.md|ck-tile-tuning]], [[ck-programming-model.md|ck-programming-model]]
+- Many GEMM / FMHA implementations in AITER still rely on **CK**; reading about **ck_tile** helps understand **tuning boundaries and bottleneck types**.
+- FlashInfer as alternative attention backend: [[flashinfer-reference.md|flashinfer-reference]]
+- FlyDSL for custom MoE kernels: [[flydsl-reference.md|flydsl-reference]]

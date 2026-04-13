@@ -1,86 +1,86 @@
-# 内存指令参考
+# Memory Instruction Reference
 
 ## Global Memory
 
-| 指令 | 宽度 | 说明 |
-|------|------|------|
-| global_load_dword | 4B | 单 lane |
-| global_load_dwordx2 | 8B | 向量化 |
-| global_load_dwordx4 | 16B | 合并访问最佳 |
-| global_store_dword[x2/x4] | 4-16B | 同样宽度 |
+| Instruction | Width | Description |
+|-------------|-------|-------------|
+| global_load_dword | 4B | Single lane |
+| global_load_dwordx2 | 8B | Vectorized |
+| global_load_dwordx4 | 16B | Best for coalesced access |
+| global_store_dword[x2/x4] | 4-16B | Same widths |
 
-**合并规则**：64 个连续 lane 访问 64 个连续元素 = 一次合并事务。步长 > 1 会降低带宽。
+**Coalescing rule**: 64 consecutive lanes accessing 64 consecutive elements = one coalesced transaction. Stride > 1 reduces bandwidth.
 
-## LDS（Local Data Share）
+## LDS (Local Data Share)
 
-| 指令 | 宽度 | 说明 |
-|------|------|------|
-| ds_read_b32 | 4B | 单 bank |
-| ds_read_b64 | 8B | 两个 bank |
-| ds_read_b128 | 16B | 四个 bank |
-| ds_write_b32/b64/b128 | 4-16B | 同样宽度 |
-| ds_swizzle_b32 | 4B | 无 LDS 读写的 lane 排列 |
+| Instruction | Width | Description |
+|-------------|-------|-------------|
+| ds_read_b32 | 4B | Single bank |
+| ds_read_b64 | 8B | Two banks |
+| ds_read_b128 | 16B | Four banks |
+| ds_write_b32/b64/b128 | 4-16B | Same widths |
+| ds_swizzle_b32 | 4B | Lane permutation without LDS read/write |
 
-**Bank 数量与容量、读带宽（代际差异，CDNA3/4 白皮书）**：
+**Bank count, capacity, and read bandwidth (generational differences, CDNA3/4 whitepapers)**:
 
-| 项目 | CDNA3 | CDNA4 |
+| Item | CDNA3 | CDNA4 |
 |------|-------|-------|
-| LDS 容量/CU | 约为 CDNA4 的 **一半**（相对 CDNA4 **160 KB/CU**） | **160 KB/CU** |
-| Bank 数 | **32** | **64**（相对 CDNA3 **翻倍**） |
-| LDS 读带宽 | **128 B/clock**（约为 CDNA4 一半） | **256 B/clock**（容量与读带宽相对 CDNA3 均为约 **2×**） |
+| LDS capacity/CU | Approximately **half** of CDNA4 (relative to CDNA4's **160 KB/CU**) | **160 KB/CU** |
+| Number of banks | **32** | **64** (**doubled** relative to CDNA3) |
+| LDS read bandwidth | **128 B/clock** (approximately half of CDNA4) | **256 B/clock** (both capacity and read bandwidth are approximately **2x** relative to CDNA3) |
 
-- **CDNA3（如 MI300X / gfx942）**：**32-bank LDS**，每 bank **4B**。
-- **CDNA4（如 MI355X / gfx950）**：**64-bank LDS**。**Bank conflict 模式与 padding 计算与 CDNA3 不同**，勿沿用 32-bank 假设下的固定 padding；迁移到 CDNA4 时需按 **64 bank** 重新推导 swizzle / pad。
-- **Direct LDS load（CDNA4 新路径）**：CDNA4 上 LDS 可经 **direct load** 从 **L1 data cache** 直接装填，减少经向量路径迂回的访存开销；调优时可与 MFMA、软件流水及 `buffer_load_lds` / DME 路径对照 profiling。
+- **CDNA3 (e.g., MI300X / gfx942)**: **32-bank LDS**, each bank **4B**.
+- **CDNA4 (e.g., MI355X / gfx950)**: **64-bank LDS**. **Bank conflict patterns and padding calculations differ from CDNA3** -- do not reuse fixed padding based on the 32-bank assumption; when migrating to CDNA4, re-derive swizzle / padding based on **64 banks**.
+- **Direct LDS load (CDNA4 new path)**: On CDNA4, LDS can be filled via **direct load** from the **L1 data cache**, reducing memory access overhead from routing through the vector path; during tuning, compare with MFMA, software pipelining, and `buffer_load_lds` / DME paths via profiling.
 
-**L1 / L2 缓存（CDNA3 与 CDNA4 一致处及带宽口径）**：
+**L1 / L2 cache (common aspects between CDNA3 and CDNA4, and bandwidth figures)**:
 
-- **L1（data）**：**32 KB**，**128 B** cache line，**64-way** 组相联（CDNA3 / CDNA4 相同）。
-- **L2（每 XCD）**：**4 MB**，**16-way**，**16 channels**；每 channel 每周期 **读 128 B、写 64 B**；**每 XCD L2 读带宽约 2 KB/clock**。
-- **L2 聚合读带宽（8 XCD 规模）**：CDNA3 约 **34.4 TB/s**；CDNA4 约 **32 TB/s**（代际间以白皮书标称为准，实际随产品与配置变化）。
+- **L1 (data)**: **32 KB**, **128 B** cache line, **64-way** set-associative (same for CDNA3 / CDNA4).
+- **L2 (per XCD)**: **4 MB**, **16-way**, **16 channels**; each channel reads **128 B** and writes **64 B** per cycle; **per-XCD L2 read bandwidth is ~2 KB/clock**.
+- **L2 aggregate read bandwidth (8-XCD scale)**: CDNA3 ~**34.4 TB/s**; CDNA4 ~**32 TB/s** (cross-generation figures are per whitepaper specifications; actual values vary with product and configuration).
 
-**Bank conflict 规则**：同一周期内多个 lane 命中同一 bank 的不同 word → conflict → 串行化。通过 **padding**、**swizzle** 或访问模式重排缓解。
+**Bank conflict rule**: When multiple lanes hit different words in the same bank within the same cycle -> conflict -> serialization. Mitigate through **padding**, **swizzle**, or access pattern rearrangement.
 
-## Data Movement Engine（DME）
+## Data Movement Engine (DME)
 
-**CDNA3 / CDNA4** 配备 **Data Movement Engine（DME）**，用于 **HBM → LDS** 的异步搬运路径（与向量核上的显式 global load 相配合）。
+**CDNA3 / CDNA4** are equipped with a **Data Movement Engine (DME)** for asynchronous **HBM -> LDS** data transfer paths (complementing explicit global loads on vector cores).
 
-- **减轻 VMEM 压力**：部分数据路径可走 DME，减少对 `global_load` / flat load 的争抢。
-- **计算与数据搬运重叠**：与 MFMA、LDS 流水线及 `buffer_load_lds` 等机制结合，便于做 **double buffering** 与软件流水。
+- **Reduces VMEM pressure**: Some data paths can use DME, reducing contention for `global_load` / flat load.
+- **Overlap of compute and data movement**: Combined with MFMA, LDS pipelining, and mechanisms like `buffer_load_lds`, this facilitates **double buffering** and software pipelining.
 
-调优时若瓶颈在 VMEM，可查阅目标 ISA / ROCm 文档中 **async DMA / buffer_load_lds** 与 DME 相关约束，并在 profiler 中对比 VMEM vs LDS 时间线。
+During tuning, if the bottleneck is VMEM, consult the target ISA / ROCm documentation for **async DMA / buffer_load_lds** and DME-related constraints, and compare VMEM vs LDS timelines in the profiler.
 
-## Buffer vs Flat 指令
+## Buffer vs Flat Instructions
 
-| 类型 | 使用场景 |
-|------|---------|
-| `buffer_load_*` | 已知 base + offset，支持范围检查，略快 |
-| `global_load_*` (flat) | 任意 64 位地址，codegen 更简单 |
+| Type | Use Case |
+|------|----------|
+| `buffer_load_*` | Known base + offset, supports bounds checking, slightly faster |
+| `global_load_*` (flat) | Arbitrary 64-bit address, simpler codegen |
 
-编译器通常自动选择。内联汇编时，base 地址为统一值（SGPR）时优先使用 buffer 指令。
+The compiler typically selects automatically. When using inline assembly, prefer buffer instructions when the base address is a uniform value (SGPR).
 
-## 内存屏障与同步
+## Memory Barriers and Synchronization
 
-### s_waitcnt — 关键指令
+### s_waitcnt -- Critical Instruction
 
 ```
 s_waitcnt vmcnt(N) lgkmcnt(M) expcnt(K)
 ```
 
-| 计数器 | 追踪内容 | 等待条件 |
-|--------|---------|---------|
-| vmcnt | Global load/store | 剩余 N 个未完成 VMEM 操作 |
-| lgkmcnt | LDS + SMEM 操作 | 剩余 M 个未完成 LDS/SMEM 操作 |
-| expcnt | Export (GDS, LDS→VGPR) | 剩余 K 个未完成 export |
+| Counter | Tracks | Wait Condition |
+|---------|--------|----------------|
+| vmcnt | Global load/store | N outstanding VMEM operations remaining |
+| lgkmcnt | LDS + SMEM operations | M outstanding LDS/SMEM operations remaining |
+| expcnt | Export (GDS, LDS->VGPR) | K outstanding exports remaining |
 
-**策略**：不要到处使用 `s_waitcnt 0`（会杀死 ILP）。计算未完成的操作数，只等待真正需要的。
+**Strategy**: Do not use `s_waitcnt 0` everywhere (it kills ILP). Count the outstanding operations and only wait for what is truly needed.
 
 ```
 global_load_dwordx4 v[0:3], ...    // vmcnt = 1
 global_load_dwordx4 v[4:7], ...    // vmcnt = 2
-// ... 做其他工作 ...
-s_waitcnt vmcnt(1)                  // 只等第一个 load
-v_add_f32 v8, v0, v1               // 使用第一个 load 的结果
-s_waitcnt vmcnt(0)                  // 现在等第二个 load
-v_add_f32 v9, v4, v5               // 使用第二个 load 的结果
+// ... do other work ...
+s_waitcnt vmcnt(1)                  // only wait for the first load
+v_add_f32 v8, v0, v1               // use the first load's result
+s_waitcnt vmcnt(0)                  // now wait for the second load
+v_add_f32 v9, v4, v5               // use the second load's result
 ```

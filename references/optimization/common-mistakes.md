@@ -1,64 +1,64 @@
-# AMD 特有常见错误
+# AMD-Specific Common Mistakes
 
-## 编译
+## Compilation
 
-| 错误 | 症状 | 修复 |
-|------|------|------|
-| 缺少 `--offload-arch` | 编译目标错误或运行时 kernel 不执行 | 始终指定 `--offload-arch=gfx942`（MI300X）或 `gfx950`（MI355X） |
-| 缺少 `-O3` | 比预期慢 5-10 倍 | 始终使用 `-O3` |
-| 直接使用 CUDA API | 编译错误 | 替换为 HIP 等价物（参见 `amd-vs-nvidia-cheatsheet.md`） |
-| `--offload-arch` 不匹配实际 GPU | Kernel 运行但结果错误或崩溃 | 用 `rocminfo \| grep gfx` 验证实际 arch |
-| 使用了 CDNA4 独有指令但目标为 gfx942 | 编译错误 | FP6/FP4 MFMA 仅 gfx950+，检查目标硬件 |
+| Mistake | Symptom | Fix |
+|---------|---------|-----|
+| Missing `--offload-arch` | Wrong compilation target or kernel doesn't execute at runtime | Always specify `--offload-arch=gfx942` (MI300X) or `gfx950` (MI355X) |
+| Missing `-O3` | 5-10x slower than expected | Always use `-O3` |
+| Using CUDA APIs directly | Compilation errors | Replace with HIP equivalents (see `amd-vs-nvidia-cheatsheet.md`) |
+| `--offload-arch` doesn't match actual GPU | Kernel runs but produces wrong results or crashes | Verify actual arch with `rocminfo \| grep gfx` |
+| Using CDNA4-exclusive instructions but targeting gfx942 | Compilation errors | FP6/FP4 MFMA is gfx950+ only, check target hardware |
 
-## 架构
+## Architecture
 
-| 错误 | 症状 | 修复 |
-|------|------|------|
-| 假设 warp = 32 | 错误的 reduction 结果、性能退化 | AMD wavefront = 64。使用 6 步 shuffle，不是 5 步 |
-| **假设 MI300X 有 192 CU** | Grid 大小不足，GPU 利用率低 | MI300X/MI325X 实际有 **304 CU**（38/XCD × 8 XCDs）|
-| 假设 shared mem = 48KB | LDS 溢出或 occupancy 错误计算 | CDNA4 **160 KB/CU**；CDNA3 容量与读带宽约为 CDNA4 **一半**（见 `isa/memory-instructions.md`）；勿用 NVIDIA 48KB 默认值 |
-| 使用 `__syncwarp()` | 不必要的同步 | AMD wavefront 是锁步的，无需部分同步 |
-| 错误的 bank conflict 计算 | 意外的 LDS 争用 | **CDNA3**：32 bank × 4B；**CDNA4**：**64 bank**（与 CDNA3 不同，padding 需重算）；conflict pattern 与 NVIDIA 不同 |
-| HIP 中滥用 **flat load**、忽略 **buffer ops** | VMEM 压力大、低于最优带宽 | 在可用场景优先 **`buffer_load_*` / buffer ops**（编译器或手写 ISA），勿假设 flat 与 buffer 等价最优 |
-| CDNA4 上仍按 **32-bank LDS** 做 padding | 隐性 bank conflict、性能不达预期 | CDNA4 为 **64-bank LDS**，按 `isa/memory-instructions.md` 更新 swizzle / pad |
-| 有 **structured sparsity** 能力却全程 dense | 未吃满有效吞吐 | 当输入在 **每 4 元一组** 中 **零占比 ≥ 50%** 时，硬件上可 **翻倍** 有效吞吐；算子/库支持时评估开启并做精度验证（见 `advanced-optimization.md`） |
-| 未使用 **`__builtin_amdgcn_s_setprio`** 等 wave 调度手段 | ping-pong / 多 wave 重叠不足 | 高阶 GEMM（见 `advanced-optimization.md`）中配合 **`sched_barrier`**、`buffer_load_lds` 做 wave 级编排 |
-| FP8 精度格式搞混 | 数值结果错误 | CDNA3 用 E4M3**FNUZ**/E5M2**FNUZ**；CDNA4 用 E4M3**FN**(OCP)/E5M2(OCP)，exponent bias 不同 |
-| 忽略 XCD（多 die）拓扑 | L2 cache miss 率异常高 | MI300X 有 8 个 XCD，每个 XCD 有自己的 L2 (4MB)；跨 XCD 访问走 L3 |
-| **假定 CDNA4 上仍有 TF32 硬件矩阵路径** | 性能/数值预期与 NVIDIA 混淆 | CDNA4 **无 TF32 Matrix 硬件**；需用 **BF16** 等路径 **软件模拟**，并对精度与吞吐重估（见 `isa/mfma-instructions.md`） |
-| **把 CDNA3 的 partition 模式原样套到 CDNA4** | 拓扑/NPS 行为与预期不符 | CDNA4 引入 **QPX**，且 **仅支持 NPS1 / NPS2**，**无 NPS4**；迁移前对照平台文档重新选 partition |
-| **忽略 CDNA4 Matrix FP64 降速** | HPC 双精度 GEMM 或隐式 FP64 远低于 CDNA3 经验值 | CDNA4 **Matrix FP64** 为 **128 FLOPS/clock/CU**（相对 CDNA3 **256** **减半**）；热点需重评算法、精度或是否改走非矩阵 FP64 路径 |
+| Mistake | Symptom | Fix |
+|---------|---------|-----|
+| Assuming warp = 32 | Wrong reduction results, performance degradation | AMD wavefront = 64. Use 6-step shuffle, not 5-step |
+| **Assuming MI300X has 192 CUs** | Insufficient grid size, low GPU utilization | MI300X/MI325X actually has **304 CUs** (38/XCD x 8 XCDs) |
+| Assuming shared mem = 48KB | LDS overflow or incorrect occupancy calculation | CDNA4 **160 KB/CU**; CDNA3 capacity and read bandwidth are approximately **half** of CDNA4 (see `isa/memory-instructions.md`); do not use the NVIDIA 48KB default |
+| Using `__syncwarp()` | Unnecessary synchronization | AMD wavefront is lockstep, no partial synchronization needed |
+| Wrong bank conflict calculation | Unexpected LDS contention | **CDNA3**: 32 bank x 4B; **CDNA4**: **64 bank** (different from CDNA3, padding must be recalculated); conflict pattern differs from NVIDIA |
+| Overusing **flat load** in HIP, ignoring **buffer ops** | High VMEM pressure, sub-optimal bandwidth | Prefer **`buffer_load_*` / buffer ops** where applicable (compiler or handwritten ISA); do not assume flat and buffer are equally optimal |
+| Still using **32-bank LDS** padding on CDNA4 | Hidden bank conflicts, performance below expectations | CDNA4 is **64-bank LDS**, update swizzle / padding per `isa/memory-instructions.md` |
+| Having **structured sparsity** capability but running fully dense | Not utilizing full effective throughput | When input has **zero ratio >= 50%** within **groups of 4 elements**, hardware can **double** effective throughput; evaluate enabling when operator/library support is available and verify precision (see `advanced-optimization.md`) |
+| Not using **`__builtin_amdgcn_s_setprio`** and other wave scheduling mechanisms | Insufficient ping-pong / multi-wave overlap | In advanced GEMM (see `advanced-optimization.md`), use with **`sched_barrier`** and `buffer_load_lds` for wave-level orchestration |
+| Mixing up FP8 precision formats | Incorrect numerical results | CDNA3 uses E4M3**FNUZ**/E5M2**FNUZ**; CDNA4 uses E4M3**FN**(OCP)/E5M2(OCP), different exponent bias |
+| Ignoring XCD (multi-die) topology | Abnormally high L2 cache miss rate | MI300X has 8 XCDs, each XCD has its own L2 (4MB); cross-XCD access goes through L3 |
+| **Assuming CDNA4 still has TF32 hardware matrix path** | Performance/numerical expectations confused with NVIDIA | CDNA4 has **no TF32 Matrix hardware**; must use **BF16** or other paths with **software emulation**, and re-evaluate precision and throughput (see `isa/mfma-instructions.md`) |
+| **Applying CDNA3 partition modes directly to CDNA4** | Topology/NPS behavior doesn't match expectations | CDNA4 introduces **QPX** and **only supports NPS1 / NPS2**, **no NPS4**; re-select partition based on platform documentation before migration |
+| **Ignoring CDNA4 Matrix FP64 slowdown** | HPC double-precision GEMM or implicit FP64 far below CDNA3 experience | CDNA4 **Matrix FP64** is **128 FLOPS/clock/CU** (relative to CDNA3's **256**, **halved**); hotspots need re-evaluation of algorithm, precision, or whether to use non-matrix FP64 path |
 
-## 性能
+## Performance
 
-| 错误 | 症状 | 修复 |
-|------|------|------|
-| Thread block 太少 | GPU 利用率低 | MI300X 至少需要 **304 个 block**（每 CU 至少一个）；MI355X 至少 256 个 |
-| 忽略寄存器溢出 | 不明原因的性能下降 | 用 ROCm Compute Profiler 检查 ScratchWaves，或 `hipcc -save-temps` 看 `.s` 文件 |
-| 直接复制 CUDA 调优参数 | 次优性能 | 为 AMD 重新调优 block size、展开因子、tile 大小 |
-| 未使用 AGPR 做 MFMA 累加器 | 更高 VGPR 压力 | 使用 AGPR 累加器释放 VGPR（参见 `isa/register-allocation.md`）|
-| 忽略 `__builtin_amdgcn_readfirstlane` | SGPR 压力高，分支效率低 | 将 lane 0 值广播到 SGPR（CK 代码中大量使用此 pattern）|
-| 未启用 TunableOp | GEMM 性能不稳定 | 设置 `PYTORCH_TUNABLEOP_ENABLED=1` 让 rocBLAS/hipBLASLt 自动调优 |
+| Mistake | Symptom | Fix |
+|---------|---------|-----|
+| Too few thread blocks | Low GPU utilization | MI300X needs at least **304 blocks** (at least one per CU); MI355X needs at least 256 |
+| Ignoring register spilling | Unexplained performance degradation | Check ScratchWaves with ROCm Compute Profiler, or inspect `.s` files via `hipcc -save-temps` |
+| Directly copying CUDA tuning parameters | Sub-optimal performance | Re-tune block size, unroll factors, and tile sizes for AMD |
+| Not using AGPR for MFMA accumulators | Higher VGPR pressure | Use AGPR accumulators to free up VGPRs (see `isa/register-allocation.md`) |
+| Ignoring `__builtin_amdgcn_readfirstlane` | High SGPR pressure, poor branch efficiency | Broadcast lane 0 value to SGPR (this pattern is heavily used in CK code) |
+| Not enabling TunableOp | Unstable GEMM performance | Set `PYTORCH_TUNABLEOP_ENABLED=1` to let rocBLAS/hipBLASLt auto-tune |
 
-## Triton 特有
+## Triton-Specific
 
-| 错误 | 症状 | 修复 |
-|------|------|------|
-| 使用 `tl.inline_asm_elementwise` | ROCm 上报错 | 使用纯 Triton 操作 |
-| BLOCK_SIZE 不是 64 的倍数 | 浪费 lane | 使用 64, 128, 256, 512, 1024 |
-| 假设 CUDA Triton 性能可迁移 | 失望 | 始终在 AMD 上 benchmark |
-| 不知道 `matrix_instr_nonkdim` | 未选到最优 MFMA 指令 | autotune 配置中加入此参数（16 或 32），控制 MFMA tile 大小 |
-| 不使用 `max-autotune` | GEMM 性能未优化 | `TORCHINDUCTOR_MAX_AUTOTUNE=1`，或 `TORCHINDUCTOR_MAX_AUTOTUNE_GEMM_BACKENDS=TRITON,ATEN,CK` |
-| FP8 kernel 在不同架构上失败 | 精度类型不匹配 | gfx950 使用 OCP FP8，其他 arch 使用 FNUZ；AITER 自动处理，自定义 kernel 需检查 |
+| Mistake | Symptom | Fix |
+|---------|---------|-----|
+| Using `tl.inline_asm_elementwise` | Errors on ROCm | Use pure Triton operations |
+| BLOCK_SIZE not a multiple of 64 | Wasted lanes | Use 64, 128, 256, 512, 1024 |
+| Assuming CUDA Triton performance translates | Disappointment | Always benchmark on AMD |
+| Not knowing about `matrix_instr_nonkdim` | Not selecting the optimal MFMA instruction | Add this parameter to autotune config (16 or 32) to control MFMA tile size |
+| Not using `max-autotune` | Unoptimized GEMM performance | `TORCHINDUCTOR_MAX_AUTOTUNE=1`, or `TORCHINDUCTOR_MAX_AUTOTUNE_GEMM_BACKENDS=TRITON,ATEN,CK` |
+| FP8 kernel fails on different architectures | Precision type mismatch | gfx950 uses OCP FP8, other archs use FNUZ; AITER handles this automatically, custom kernels must check |
 
-## 多硬件迁移
+## Cross-Hardware Migration
 
-| 错误 | 症状 | 修复 |
-|------|------|------|
-| MI300X 的 tile size 直接用在 MI355X | 性能不达标 | CU 数量（304 vs 256）、LDS 大小（64 vs 160 KB）、带宽不同，必须重新调优 |
-| 未考虑 CDNA4 新指令 | 错失性能提升 | MI355X 的 FP16 MFMA 有更大 K 维度（16×16×32, 32×32×16），以及 FP6/FP4 支持 |
-| 跨 arch 编译但未测试 | 运行时行为不同 | `--offload-arch=gfx942 --offload-arch=gfx950` 编译后，在两种硬件上分别验证和 benchmark |
+| Mistake | Symptom | Fix |
+|---------|---------|-----|
+| Using MI300X tile sizes directly on MI355X | Performance below target | CU count (304 vs 256), LDS size (64 vs 160 KB), and bandwidth differ; must re-tune |
+| Not considering CDNA4 new instructions | Missed performance gains | MI355X's FP16 MFMA has larger K dimension (16x16x32, 32x32x16), plus FP6/FP4 support |
+| Cross-arch compilation without testing | Different runtime behavior | After compiling with `--offload-arch=gfx942 --offload-arch=gfx950`, verify and benchmark on both hardware targets separately |
 
-## 知识库
+## Knowledge Base
 
-本文件是活文档。在迭代过程中发现新错误时回填。
+This file is a living document. Backfill when new mistakes are discovered during iterations.

@@ -1,156 +1,156 @@
-# 极限优化：突破性能平台期
+# Extreme Optimization: Breaking Through Performance Plateaus
 
-## 使用时机
+## When to Use
 
-当 kernel 已通过正确性验证、已超过 torch.compile baseline，但与理论峰值仍有差距（带宽利用率 <70% 或 MFMA 利用率 <80%）时。按以下顺序尝试。
+When a kernel has already passed correctness verification, already surpassed the torch.compile baseline, but still has a gap from the theoretical peak (bandwidth utilization <70% or MFMA utilization <80%). Try the following in order.
 
-## 1. 软件流水线与多级缓冲
+## 1. Software Pipelining and Multi-Level Buffering
 
-**原理**：当前迭代的计算与下一迭代的数据加载重叠执行。
+**Principle**: Overlap the current iteration's computation with the next iteration's data loading.
 
-**技术**：
-- 双缓冲：LDS 分两半，交替加载和计算
-- 三级流水线：加载 N+1、计算 N、写回 N-1
-- 异步拷贝：DMA 引擎搬运数据与 MFMA 完全并发
+**Techniques**:
+- Double buffering: Split LDS in half, alternating between loading and computing
+- Three-stage pipeline: Load N+1, compute N, write back N-1
+- Async copy: DMA engine transfers data fully concurrently with MFMA
 
-**AMD 实现要点**：
-- 需要精确的 `s_waitcnt lgkmcnt/vmcnt`（参见 `isa/scheduling-pipeline.md`）
-- LDS 缓冲：核对每 CU **LDS 容量与读带宽**（CDNA4 白皮书：**160 KiB/CU**、**256 B/clock** 读带宽；相对 CDNA3 容量与读带宽约 **2×**；详见 `isa/memory-instructions.md`）
-- **CDNA4**：存在 **LDS 自 L1 data cache 的 direct load** 路径，可将热数据尽量留在 **L1→LDS** 链路上，减轻与全局路径的争抢；与 double buffering、异步搬运一起 profile。
-- 示例：当前 MFMA 执行时预取下一个 tile
+**AMD Implementation Notes**:
+- Requires precise `s_waitcnt lgkmcnt/vmcnt` (see `isa/scheduling-pipeline.md`)
+- LDS buffer: verify per-CU **LDS capacity and read bandwidth** (CDNA4 whitepaper: **160 KiB/CU**, **256 B/clock** read bandwidth; relative to CDNA3 capacity and read bandwidth approximately **2x**; see `isa/memory-instructions.md`)
+- **CDNA4**: There is a **direct load from L1 data cache to LDS** path, which can keep hot data on the **L1->LDS** link, reducing contention with the global path; profile together with double buffering and async transfers.
+- Example: Prefetch the next tile while the current MFMA is executing
 
-**预期收益**：内存受限 kernel 通常 10-30%
+**Expected Gains**: Memory-bound kernels typically 10-30%
 
-## 2. Wavefront 特化
+## 2. Wavefront Specialization
 
-**原理**：同一 block 内不同 wavefront 承担不同角色，通过 barrier 协调。
+**Principle**: Different wavefronts within the same block take on different roles, coordinated via barriers.
 
-**角色**：计算 wavefront（MFMA）、数据搬运（global→LDS）、归约（softmax/reduction）
+**Roles**: Compute wavefront (MFMA), data transfer (global->LDS), reduction (softmax/reduction)
 
-**AMD 实现要点**：
-- wavefront=64 → 每个 wavefront 更重，特化收益更大
-- 角色分配：`threadIdx.x / 64` 给出 wavefront ID
-- 通过 `__syncthreads()` 或 LDS fence 协调
+**AMD Implementation Notes**:
+- wavefront=64 -> each wavefront is heavier, specialization gains are larger
+- Role assignment: `threadIdx.x / 64` gives wavefront ID
+- Coordinate via `__syncthreads()` or LDS fence
 
-**预期收益**：多阶段 kernel（Attention）可获 5-15%
+**Expected Gains**: Multi-stage kernels (Attention) can achieve 5-15%
 
-## 3. 数据布局与 Swizzle
+## 3. Data Layout and Swizzle
 
-**原理**：改变数据排列以消除 bank conflict 和提升合并访问率。
+**Principle**: Rearrange data layout to eliminate bank conflicts and improve coalesced access rates.
 
-**技术**：
-- LDS padding：按目标架构 **bank 数** padding（CDNA3：**32 bank** × 4B；CDNA4：**64 bank** — 见 `isa/memory-instructions.md`）
-- `ds_swizzle`：硬件 lane 排列，无需 LDS 读写
-- SOA 布局用于向量化 load（`buffer_load_dwordx4`）
+**Techniques**:
+- LDS padding: Pad according to target architecture **bank count** (CDNA3: **32 bank** x 4B; CDNA4: **64 bank** -- see `isa/memory-instructions.md`)
+- `ds_swizzle`: Hardware lane permutation without LDS reads/writes
+- SOA layout for vectorized loads (`buffer_load_dwordx4`)
 
-**AMD 实现要点**：
-- AMD LDS bank 规则与 NVIDIA 不同 — 重新计算 padding
-- 用 `omniperf` LDS bank conflict 指标验证
+**AMD Implementation Notes**:
+- AMD LDS bank rules differ from NVIDIA -- recalculate padding
+- Verify with `omniperf` LDS bank conflict metrics
 
-**预期收益**：存在 bank conflict 时 5-20%
+**Expected Gains**: 5-20% when bank conflicts exist
 
-## 4. Occupancy vs ILP 权衡
+## 4. Occupancy vs ILP Tradeoff
 
-**原理**：有时更少 wavefront 配合更多寄存器优于大量 wavefront 配合溢出。
+**Principle**: Sometimes fewer wavefronts with more registers outperforms many wavefronts with spilling.
 
-**技术**：
-- `__launch_bounds__(threads, minBlocks)` 控制寄存器分配
-- 检测溢出：`omniperf` → ScratchWaveslifetimeVGPR > 0
-- 跨 wavefront group 的寄存器重平衡（参考 AVO v33）
+**Techniques**:
+- `__launch_bounds__(threads, minBlocks)` to control register allocation
+- Detect spilling: `omniperf` -> ScratchWaveslifetimeVGPR > 0
+- Register rebalancing across wavefront groups (refer to AVO v33)
 
-**AMD 实现要点**：
-- MI300X：65536 VGPR/CU。参见 `isa/register-allocation.md` 中的 occupancy 表
-- 高 occupancy 和低 occupancy 配置都 profile — 更快的获胜
+**AMD Implementation Notes**:
+- MI300X: 65536 VGPR/CU. See the occupancy table in `isa/register-allocation.md`
+- Profile both high occupancy and low occupancy configurations -- the faster one wins
 
-**预期收益**：消除溢出时 3-10%
+**Expected Gains**: 3-10% when spilling is eliminated
 
-## 5. Persistent Kernel 与 Tile 调度
+## 5. Persistent Kernel and Tile Scheduling
 
-**原理**：只 launch 一次，通过原子计数器自行分配 tile。消除重复 launch 开销 + L2 友好的遍历顺序。
+**Principle**: Launch only once, self-assign tiles via atomic counters. Eliminates repeated launch overhead + L2-friendly traversal order.
 
-**技术**：
-- `atomicAdd` 全局 tile 计数器
-- Swizzled 遍历（L 形、Z 形、Hilbert 曲线）提升 L2 复用
-- 跨 tile 负载均衡用于不规则形状（causal mask）
+**Techniques**:
+- `atomicAdd` global tile counter
+- Swizzled traversal (L-shaped, Z-shaped, Hilbert curve) to improve L2 reuse
+- Cross-tile load balancing for irregular shapes (causal mask)
 
-**AMD 实现要点**：
-- MI300X L2 较大（256MB）— tile 遍历顺序影响显著
-- CK 的 TileScheduler 可作为参考实现
+**AMD Implementation Notes**:
+- MI300X L2 is relatively large (256MB) -- tile traversal order has significant impact
+- CK's TileScheduler can serve as a reference implementation
 
-**预期收益**：多次 launch 场景 5-15%；L2 优化通常 3-8%
+**Expected Gains**: 5-15% for multi-launch scenarios; L2 optimization typically 3-8%
 
-## 6. 混合精度策略
+## 6. Mixed Precision Strategy
 
-**原理**：超越"全用 BF16"，在不同计算阶段使用不同精度。
+**Principle**: Go beyond "use BF16 for everything" -- use different precisions for different computation stages.
 
-**技术**：
-- 输入 FP8/BF16 → MFMA 计算 → FP32 累积 → BF16 输出
-- 关键中间结果（如 softmax max/sum）保持 FP32
-- 利用 MFMA 的混合精度能力（FP16 输入、FP32 输出）
+**Techniques**:
+- Input FP8/BF16 -> MFMA computation -> FP32 accumulation -> BF16 output
+- Keep critical intermediate results (e.g., softmax max/sum) in FP32
+- Leverage MFMA's mixed-precision capability (FP16 input, FP32 output)
 
-**AMD 实现要点**：
-- 查阅 `isa/mfma-instructions.md` 了解可用精度组合与 **每 CU FLOPS/clock**（CDNA4 上 FP16/FP8/MX 等相对 CDNA3 提升，**Matrix FP64 减半**）
-- MI355X/CDNA4 新增 **MXFP6/MXFP4** 等格式 — 以硬件文档与 ROCm 发布说明为准
-- **超越函数（transcendental）吞吐**：CDNA4 上相关指令有效速率相对 CDNA3 约 **2×**，**softmax**、激活等含 **exp/log** 的片段更易成为算子内可优化热点
-- **Structured sparsity**：当输入在 **每 4 个元素一组** 中 **零元素比例 ≥ 50%** 时，硬件路径上可 **翻倍** 有效吞吐（需算子/库支持与精度验证）
+**AMD Implementation Notes**:
+- Consult `isa/mfma-instructions.md` for available precision combinations and **per-CU FLOPS/clock** (improvements on CDNA4 for FP16/FP8/MX etc. relative to CDNA3, **Matrix FP64 halved**)
+- MI355X/CDNA4 adds new **MXFP6/MXFP4** formats -- refer to hardware documentation and ROCm release notes for details
+- **Transcendental throughput**: On CDNA4, related instructions have an effective rate approximately **2x** relative to CDNA3; segments containing **exp/log** such as **softmax** and activations are more likely to become optimizable hotspots within an operator
+- **Structured sparsity**: When input has **zero element ratio >= 50%** within **groups of 4 elements**, the hardware path can **double** effective throughput (requires operator/library support and precision verification)
 
-**预期收益**：计算受限 kernel 可获 10-30% TFLOPS 提升
+**Expected Gains**: Compute-bound kernels can achieve 10-30% TFLOPS improvement
 
-## 7. 编译器对抗与引导
+## 7. Compiler Counter-Measures and Guidance
 
-**原理**：在编译器自动优化不足或过度时手动干预。
+**Principle**: Manually intervene when compiler auto-optimization is insufficient or excessive.
 
-**技术**：
-- `#pragma unroll N`：精确控制展开
-- `__launch_bounds__`：引导寄存器分配
-- `volatile` / `__builtin_nontemporal_*`：绕过 cache / 阻止重排序
-- 内联汇编：最后手段（参见 `isa/inline-asm-patterns.md`）
+**Techniques**:
+- `#pragma unroll N`: Precise control over unrolling
+- `__launch_bounds__`: Guide register allocation
+- `volatile` / `__builtin_nontemporal_*`: Bypass cache / prevent reordering
+- Inline assembly: Last resort (see `isa/inline-asm-patterns.md`)
 
-**AMD 实现要点**：
-- `hipcc -save-temps` 可查看生成的 ISA，验证编译器行为
+**AMD Implementation Notes**:
+- `hipcc -save-temps` lets you inspect the generated ISA to verify compiler behavior
 
-**预期收益**：因情况而异，通常 2-10%
+**Expected Gains**: Varies by situation, typically 2-10%
 
-## 8. L2 Cache 全局优化
+## 8. L2 Cache Global Optimization
 
-**原理**：全局层面的数据复用策略，跨 tile / 跨 kernel 最大化 L2 命中率。
+**Principle**: Global-level data reuse strategy, maximizing L2 hit rate across tiles / across kernels.
 
-**技术**：
-- Tile 遍历顺序（GEMM 的 K 维度尤其敏感）
-- 跨 kernel fusion 保持数据在 L2 中
-- L2 cache residency 控制（如硬件支持 prefetch hint）
+**Techniques**:
+- Tile traversal order (GEMM's K dimension is especially sensitive)
+- Cross-kernel fusion to keep data in L2
+- L2 cache residency control (e.g., hardware-supported prefetch hints)
 
-**AMD 实现要点**：
-- MI300X L2 = 256MB，相对较大
-- 用 `rocprof` TCC_HIT/TCC_MISS 计数器测量
+**AMD Implementation Notes**:
+- MI300X L2 = 256MB, relatively large
+- Measure with `rocprof` TCC_HIT/TCC_MISS counters
 
-**预期收益**：内存受限 kernel 通常 3-8%
+**Expected Gains**: Memory-bound kernels typically 3-8%
 
-## 9. FP8 GEMM 优化递进（CDNA4 / ROCm 实践）
+## 9. FP8 GEMM Optimization Progression (CDNA4 / ROCm Practice)
 
-ROCm 博文等资料给出在 **CDNA4** 上 **FP8 GEMM** 从朴素实现到接近峰值的典型递进（数值为文中示例，实际以本机 profiling 为准）：
+ROCm blog posts and other materials describe a typical progression from naive implementation to near-peak on **CDNA4** for **FP8 GEMM** (numbers are examples from the articles; actual results should be based on local profiling):
 
-| 阶段 | 做法 | 代表性结果（示例） |
-|------|------|---------------------|
-| Naive | 未充分 tiling / 未对齐硬件 MFMA | ~**1.15 TFLOPS** |
-| LDS tiling + MFMA | 软件 tile 与矩阵核对齐 | 大幅提升 |
-| 向量化 load + `buffer_load_lds` | 异步 DMA、缓解 VMEM | 再提升 |
-| LDS swizzle + double buffering | 降 bank conflict、重叠搬运与计算 | 显著增益 |
-| 8-wave ping-pong 调度 | `__builtin_amdgcn_s_setprio()`、`sched_barrier`、与 `buffer_load_lds` 协同 | ~**2597 TFLOPS**（接近峰值区） |
+| Stage | Approach | Representative Result (Example) |
+|-------|----------|---------------------------------|
+| Naive | Insufficient tiling / not aligned with hardware MFMA | ~**1.15 TFLOPS** |
+| LDS tiling + MFMA | Software tile aligned with matrix core | Significant improvement |
+| Vectorized load + `buffer_load_lds` | Async DMA, relieving VMEM | Further improvement |
+| LDS swizzle + double buffering | Reducing bank conflicts, overlapping transfer and compute | Notable gains |
+| 8-wave ping-pong scheduling | `__builtin_amdgcn_s_setprio()`, `sched_barrier`, coordinated with `buffer_load_lds` | ~**2597 TFLOPS** (near peak region) |
 
-**关键技术摘要**：
+**Key Technical Summary**:
 
-- **`buffer_load_lds`**：异步把数据送入 LDS，利于与 MFMA 流水重叠。
-- **`__builtin_amdgcn_s_setprio()`** 与 **`sched_barrier`**：控制 wave 优先级与调度屏障，服务 **ping-pong** 多 wave 编排。
-- 与上文「软件流水线」「数据布局与 Swizzle」两节对照：CDNA4 上 **LDS 为 64 bank**，padding 需按 **64-bank** 重算（见 `isa/memory-instructions.md`）。
+- **`buffer_load_lds`**: Asynchronously sends data into LDS, facilitating overlap with MFMA pipeline.
+- **`__builtin_amdgcn_s_setprio()`** and **`sched_barrier`**: Control wave priority and scheduling barriers, serving **ping-pong** multi-wave orchestration.
+- Cross-reference with the "Software Pipelining" and "Data Layout and Swizzle" sections above: On CDNA4 **LDS has 64 banks**, padding must be recalculated for **64-bank** (see `isa/memory-instructions.md`).
 
-## 选择指南
+## Selection Guide
 
-| 瓶颈类型 | 诊断指标 | 优先技术 |
-|----------|---------|---------|
-| HBM 带宽受限 | 带宽利用率 >80% | 软件流水线、L2 优化、数据布局 |
-| LDS 受限 | Bank conflict 率高 | Swizzle、padding、数据布局 |
-| 计算受限 | MFMA 利用率 <70% | Wavefront 特化、混合精度、ILP |
-| 寄存器溢出 | ScratchWaves > 0 | Occupancy 调优、寄存器重平衡 |
-| Launch 开销 | 多次小 kernel launch | Persistent kernel |
-| 编译器问题 | ISA 审查发现冗余指令 | 编译器引导、内联汇编 |
+| Bottleneck Type | Diagnostic Metric | Priority Techniques |
+|-----------------|-------------------|---------------------|
+| HBM bandwidth bound | Bandwidth utilization >80% | Software pipelining, L2 optimization, data layout |
+| LDS bound | High bank conflict rate | Swizzle, padding, data layout |
+| Compute bound | MFMA utilization <70% | Wavefront specialization, mixed precision, ILP |
+| Register spilling | ScratchWaves > 0 | Occupancy tuning, register rebalancing |
+| Launch overhead | Many small kernel launches | Persistent kernel |
+| Compiler issues | ISA review reveals redundant instructions | Compiler guidance, inline assembly |

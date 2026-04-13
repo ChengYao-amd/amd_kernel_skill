@@ -1,116 +1,116 @@
-# Triton ROCm 后端 — 差异、Autotune 与调试
+# Triton ROCm Backend -- Differences, Autotune, and Debugging
 
-## 不支持的特性
+## Unsupported Features
 
-| 特性 | 状态 | 替代方案 |
-|------|------|----------|
-| `tl.inline_asm_elementwise` | 不支持 | 使用纯 Triton 算子组合 |
-| 部分 `tl.extra.cuda` API | 不可用或行为不同 | 以 ROCm 构建与文档为准做探测 |
-| `tl.tensor` 布局细节 | 可能与 CUDA 不完全一致 | 在目标 GPU 上实测 |
+| Feature | Status | Alternative |
+|---------|--------|-------------|
+| `tl.inline_asm_elementwise` | Not supported | Use pure Triton operator composition |
+| Some `tl.extra.cuda` APIs | Unavailable or behave differently | Probe based on ROCm build and documentation |
+| `tl.tensor` layout details | May not be fully consistent with CUDA | Test on target GPU |
 
-## Autotune 与 `matrix_instr_nonkdim`（AMD）
+## Autotune and `matrix_instr_nonkdim` (AMD)
 
-在 AMDGPU 上，**MFMA** 指令有多种 **M×N×K** tile。**`matrix_instr_nonkdim`** 用于约束 **非 K 维** 上的硬件指令形状（常见取值为 **16 或 32** 等，与目标架构暴露的 MFMA 规格一致）。**PyTorch Inductor** 在 AMDGPU GEMM autotune 中已将该参数纳入搜索空间，以便在 **32×32×8** 与 **16×16×16** 等 MFMA 形态间自动选型；未纳入时可能显著低于最优（社区 PR 与 Inductor 变更说明可参考 PyTorch / Triton 发行说明）。
+On AMDGPU, **MFMA** instructions have multiple **MxNxK** tiles. **`matrix_instr_nonkdim`** constrains the **non-K dimension** hardware instruction shape (common values are **16 or 32**, etc., matching the MFMA specs exposed by the target architecture). **PyTorch Inductor** has included this parameter in the search space for AMDGPU GEMM autotune to automatically select between **32x32x8** and **16x16x16** and other MFMA shapes; without it, performance may be significantly below optimal (see community PRs and Inductor changelog in PyTorch / Triton release notes).
 
-**与 Triton kernel 配置的关系**：AMD 后端 autotune 配置中常见字段包括：
+**Relationship with Triton kernel configuration**: Common fields in AMD backend autotune configuration include:
 
-- **`BLOCK_M`, `BLOCK_N`, `BLOCK_K`**：软件 tile。
-- **`num_stages`**：软件流水线级数（与 CDNA 上双缓冲、prefetch 策略相关）。
-- **`num_warps`**：在 AMD 上对应 **wavefront 组织方式**（每 wavefront **64** 线程，而非 NVIDIA 的 32）。
-- **`matrix_instr_nonkdim`**：与 **硬件 MFMA 指令形状** 对齐，供编译器选择合适 MFMA。
+- **`BLOCK_M`, `BLOCK_N`, `BLOCK_K`**: Software tiles.
+- **`num_stages`**: Software pipeline stages (related to double buffering and prefetch strategies on CDNA).
+- **`num_warps`**: On AMD, corresponds to **wavefront organization** (each wavefront has **64** threads, not NVIDIA's 32).
+- **`matrix_instr_nonkdim`**: Aligns with **hardware MFMA instruction shape**, for the compiler to select the appropriate MFMA.
 
-建议：配置空间内保留 **`num_stages=1`** 作为回退；**`num_warps`** 与 **block 尺寸** 需满足 **64 线程 wavefront** 与寄存器/LDS 约束。
+Recommendation: Keep **`num_stages=1`** in the configuration space as a fallback; **`num_warps`** and **block size** must satisfy **64-thread wavefront** and register/LDS constraints.
 
-## `torch.compile` + Max Autotune（Inductor）
+## `torch.compile` + Max Autotune (Inductor)
 
-启用 Inductor 对 GEMM 等算子做更激进 autotune 时，可配合环境变量：
+When enabling Inductor for more aggressive autotune on GEMM and other operators, use with environment variables:
 
 ```bash
-# 打开 Inductor 广泛 autotune（含 GEMM 等）
+# Enable Inductor extensive autotune (including GEMM etc.)
 export TORCHINDUCTOR_MAX_AUTOTUNE=1
 
-# GEMM 后端候选：Triton、PyTorch ATen、Composable Kernel（CK，ROCm 上常用）
+# GEMM backend candidates: Triton, PyTorch ATen, Composable Kernel (CK, commonly used on ROCm)
 export TORCHINDUCTOR_MAX_AUTOTUNE_GEMM_BACKENDS=TRITON,ATEN,CK
 ```
 
-**说明**：
+**Notes**:
 
-- 需在代码中配合 **`torch.compile(..., mode=...)`** 等实际触发 Inductor 的路径；仅设环境变量而不走编译路径不会生效。
-- **`CK`** 依赖 ROCm 构建与 PyTorch 的 CK 集成是否开启；若某后端不可用，Inductor 会跳过或回退（以运行时日志为准）。
-- 组合与大小写以当前 PyTorch 版本 **`torch._inductor.config`** / 文档为准。
+- Must be paired with **`torch.compile(..., mode=...)`** or other paths in code that actually trigger Inductor; setting environment variables alone without going through the compilation path will have no effect.
+- **`CK`** depends on whether the ROCm build and PyTorch's CK integration are enabled; if a backend is unavailable, Inductor will skip or fall back (check runtime logs).
+- Combinations and capitalization should follow the current PyTorch version's **`torch._inductor.config`** / documentation.
 
-## Block 尺寸与 MI300 类 GPU
+## Block Size and MI300-class GPUs
 
-- **Block 内线程数** 宜为 **64 的倍数**（与 wavefront 对齐）。
-- 常见候选：**64, 128, 256, 512, 1024**；**MI300X** 上 **128 / 256** 常作为起点。
-- **Grid 过小** 时难以填满 **大量 CU**；需结合 occupancy 与 profile 验证。
+- **Thread count per block** should be a **multiple of 64** (aligned with wavefront).
+- Common candidates: **64, 128, 256, 512, 1024**; on **MI300X**, **128 / 256** are common starting points.
+- When **grid is too small**, it is hard to fill the **large number of CUs**; verify with occupancy and profiling.
 
-## 性能与验证
+## Performance and Verification
 
-- ROCm 上生成代码质量可能与 CUDA 后端不同；应用 **`rocprof` / `rocprofv3`** 或 **ROCm Compute Profiler** 验证真实热点与 MFMA 使用。
-- 若 Triton 达到平台期，可评估 **HIP C++ / CK** 以获得更细控制。
+- Code generation quality on ROCm may differ from the CUDA backend; use **`rocprof` / `rocprofv3`** or **ROCm Compute Profiler** to verify actual hotspots and MFMA usage.
+- If Triton hits a plateau, evaluate **HIP C++ / CK** for finer control.
 
-## AMD ROCm Triton：TTGIR 与 LLVM 专属 Pass（概念）
+## AMD ROCm Triton: TTGIR and LLVM-specific Passes (concepts)
 
-AMD 维护的 **ROCm Triton fork** 在 **TTGIR** 层包含若干与 CDNA 密切相关的优化 pass（名称与版本以实际 LLVM/ROCm 为准），常见包括：
+The AMD-maintained **ROCm Triton fork** includes several optimization passes at the **TTGIR** layer closely related to CDNA (names and versions per actual LLVM/ROCm), commonly including:
 
-| Pass（TTGIR） | 作用摘要 |
-|---------------|----------|
-| **AccelerateMatmul** | 选择最优 **MFMA** 指令形态 |
-| **BlockPingpong** | 实现 **LDS double-buffer** 调度 |
-| **CanonicalizePointers** | 规范化与优化指针，利于后续访存优化 |
-| **ConvertToBufferOps** | 将 **flat load** 转为 **buffer load**（通常更有利于性能） |
+| Pass (TTGIR) | Summary |
+|--------------|---------|
+| **AccelerateMatmul** | Select the optimal **MFMA** instruction shape |
+| **BlockPingpong** | Implement **LDS double-buffer** scheduling |
+| **CanonicalizePointers** | Normalize and optimize pointers, benefiting subsequent memory access optimization |
+| **ConvertToBufferOps** | Convert **flat loads** to **buffer loads** (generally more performance-friendly) |
 
-此外还有 **LLVM-IR** 层 pass。需要 dump 中间表示时，可尝试：
+There are also **LLVM-IR** layer passes. To dump intermediate representations, try:
 
 ```bash
 export MLIR_ENABLE_DUMP=1
-# 再配合 TRITON_DEBUG / 缓存目录等，查看各阶段 IR
+# Combined with TRITON_DEBUG / cache directory settings, inspect IR at each stage
 ```
 
-说明：pass 集合随 **ROCm / Triton** 版本变化，升级后建议对比生成 IR 与 `rocprof` 结果。
+Note: The pass set changes across **ROCm / Triton** versions; after upgrading, compare generated IR and `rocprof` results.
 
-## 调试
+## Debugging
 
-### Triton 自身
+### Triton itself
 
 ```bash
 export TRITON_DEBUG=1
 python kernel.py
 ```
 
-### 编译产物与缓存目录
+### Build artifacts and cache directory
 
 ```bash
-# 固定缓存目录，便于查看 LLVM/ISA 等生成物
+# Fix cache directory for easy inspection of LLVM/ISA and other generated artifacts
 export TRITON_CACHE_DIR=/tmp/triton_cache
 python kernel.py
-# 在 TRITON_CACHE_DIR 下浏览按 hash 组织的内核缓存
+# Browse kernel caches organized by hash under TRITON_CACHE_DIR
 ```
 
-### PyTorch Inductor：`TORCH_COMPILE_DEBUG`
+### PyTorch Inductor: `TORCH_COMPILE_DEBUG`
 
 ```bash
 export TORCH_COMPILE_DEBUG=1
 python your_script.py
 ```
 
-开启后通常会在工作目录生成 **`torch_compile_debug/`**，其中包含 **`output_code.py`** 等文件，可查看 **Inductor 生成的 Triton kernel 源码** 与调度逻辑，便于核对 **`BLOCK_*`、`num_stages`、`num_warps`、`matrix_instr_nonkdim`** 等配置是否如预期。
+When enabled, this typically generates a **`torch_compile_debug/`** directory in the working directory, containing files such as **`output_code.py`**, which allows you to inspect the **Triton kernel source code generated by Inductor** and scheduling logic, making it easy to verify whether **`BLOCK_*`, `num_stages`, `num_warps`, `matrix_instr_nonkdim`** and other configurations are as expected.
 
-## FP8 与架构（gfx950 vs 其他）
+## FP8 and Architecture (gfx950 vs others)
 
-- **CDNA3（如 gfx942）** 上 FP8 训练/推理生态常与 **FNUZ** 风格（如 **E4M3FNUZ / E5M2FNUZ**）对齐。
-- **CDNA4（gfx950）** 上更强调 **OCP FP8**（如 **E4M3 / E5M2** 标准编码），与 **FNUZ** 在指数偏置与位解释上不同。
-- **Triton / PyTorch / LLVM** 在较新版本中针对 **gfx942 / gfx950** 区分 FP8 路径；跨架构迁移时需做 **数值与 bitwise 回归**，勿假设 CUDA 或旧 gfx 的 FP8 行为可直接复用。
+- **CDNA3 (e.g., gfx942)** FP8 training/inference ecosystem is commonly aligned with **FNUZ** style (e.g., **E4M3FNUZ / E5M2FNUZ**).
+- **CDNA4 (gfx950)** emphasizes **OCP FP8** (e.g., **E4M3 / E5M2** standard encoding), which differs from **FNUZ** in exponent bias and bit interpretation.
+- **Triton / PyTorch / LLVM** in newer versions differentiate FP8 paths for **gfx942 / gfx950**; when migrating across architectures, perform **numerical and bitwise regression**, and do not assume CUDA or older gfx FP8 behavior can be directly reused.
 
-## 常见陷阱
+## Common Pitfalls
 
-1. **假设 CUDA Triton 最优配置可原样迁移到 ROCm** — 必须重测。
-2. **`tl.constexpr`** 仅用于真编译时常量；滥用会导致意外重编译或错误特化。
-3. **未覆盖 `num_stages=1` 与较小 `matrix_instr_nonkdim` 候选** — CDNA 上偶发更优。
-4. **Grid 相对 CU 数过小** — MI300X 等需要足够并行度才能隐藏延迟。
+1. **Assuming CUDA Triton optimal configuration can be directly migrated to ROCm** -- must re-test.
+2. **`tl.constexpr`** is only for true compile-time constants; misuse causes unexpected recompilation or incorrect specialization.
+3. **Not including `num_stages=1` and smaller `matrix_instr_nonkdim` candidates** -- occasionally better on CDNA.
+4. **Grid too small relative to CU count** -- MI300X and similar require sufficient parallelism to hide latency.
 
-## 参考
+## References
 
-- ROCm 文档：[Optimizing Triton kernels](https://rocm.docs.amd.com/en/latest/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html)
-- PyTorch：`TORCHINDUCTOR_MAX_AUTOTUNE`、`TORCH_COMPILE_DEBUG` 相关说明以官方文档与 `torch._inductor.config` 为准。
+- ROCm documentation: [Optimizing Triton kernels](https://rocm.docs.amd.com/en/latest/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html)
+- PyTorch: `TORCHINDUCTOR_MAX_AUTOTUNE`, `TORCH_COMPILE_DEBUG` related documentation per official docs and `torch._inductor.config`.

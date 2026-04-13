@@ -33,7 +33,6 @@ amd-kernel-skill/
 │   ├── toolchain/                    #   Layer 3: 工具链（profiling 决策树, rocprof, hipcc, Triton）
 │   ├── libraries/                    #   Layer 4: 库与 API（GEMM 调优, AITER, CK, RCCL）
 │   ├── optimization/                 #   Layer 5: 优化模式（SOTA recipes, 高级技术, 常见错误）
-│   └── crawl-data/                   #   原始爬取数据（143+ 页, 深入查阅用）
 │
 ├── scripts/                          # 验证脚本
 │   ├── verify_correctness.py         #   正确性验证（多输入 + dtype 分级精度）

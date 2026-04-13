@@ -115,16 +115,16 @@ Read when **iterating on kernel performance**.
 | `optimization/common-mistakes.md` | AMD-specific pitfalls: MI300X has **304 CU** (not 192), CDNA4 LDS **64-bank** (not 32), FP8 **FNUZ vs OCP** mismatch, TF32 removed from CDNA4, CDNA4 Matrix FP64 halved, QPX/NPS differences, missing `-O3`, buffer ops vs flat, `s_setprio` for scheduling | Before submitting kernel, review this checklist |
 | `optimization/amd-vs-nvidia-cheatsheet.md` | CUDA→HIP migration: terminology (warp→wavefront, SM→CU, shared→LDS), API mapping, behavioral differences (warp 32→64, reduction 5→6 steps, no `__syncwarp` needed), migration checklist | Porting CUDA kernel to HIP |
 
-### Raw Research Data (`references/crawl-data/`)
-
-Detailed crawl reports for deep-dive reference. Not needed for routine optimization — consult when the structured docs above don't cover your specific question.
+### Additional Reference Files (redistributed from crawl-data)
 
 | File | Content |
 |------|---------|
-| `crawl-data/README.md` | Index of all 143+ crawled pages with categorization |
-| `crawl-data/extracted_sota_patterns.md` | 909 lines of production code extracted from CK, AITER, FP8 GEMM blog |
-| `crawl-data/p0_isa_mfma_lowlevel.md` | ISA/MFMA encoding, Matrix Calculator, rocWMMA, performance counters |
-| `crawl-data/p1_gemm_attention_tuning.md` | hipBLASLt, rocBLAS, Flash Attention variants, Stream-K, Triton |
-| `crawl-data/p2_system_optimization.md` | RCCL, MIOpen, MXFP4, FP8 GEMM progression, DeepSeek, ROCm 7.12 |
-| `crawl-data/p3_deep_dive_cases.md` | DeepSeek, Kimi/FlyDSL, GEAK agent, MI355X training benchmarks |
-| `crawl-data/rocm_crawl_report_round{1,2,3}.md` | Round 1-3 raw crawl data (103+ pages total) |
+| `toolchain/performance-counters.md` | Complete GPU performance counter reference (MFMA, SPI, LDS, cache, CDNA4 new counters) |
+| `toolchain/system-tuning.md` | BIOS settings, OS tuning, GPU partitioning, NUMA, Docker configuration |
+| `toolchain/environment-variables.md` | ROCm/HIP/hipBLASLt/RCCL/Triton/vLLM environment variables reference |
+| `libraries/rocwmma-reference.md` | rocWMMA API, fragment types, data type support matrix |
+| `libraries/flydsl-reference.md` | FlyDSL DSL for GPU kernels: syntax, examples, integration |
+| `libraries/flashinfer-reference.md` | FlashInfer on ROCm: API, performance comparison |
+| `optimization/sota-code-patterns.md` | Production code patterns from CK/AITER/FP8 GEMM (buffer_load_lds, swizzle, MFMA layouts) |
+| `optimization/inference-serving.md` | vLLM, SGLang, speculative decoding, prefill-decode disaggregation |
+| `optimization/case-studies.md` | DeepSeek-R1/V3, Kimi-K2.5, MI355X training, MoE optimization |

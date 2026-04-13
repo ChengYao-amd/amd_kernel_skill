@@ -1,48 +1,48 @@
-# hipcc 编译指南
+# hipcc Compilation Guide
 
-## 基本命令
+## Basic Commands
 
 ```bash
-# 单目标
+# Single target
 hipcc -O3 --offload-arch=gfx942 -o kernel.so -shared -fPIC kernel.cpp
 
-# 多目标
+# Multiple targets
 hipcc -O3 --offload-arch=gfx942 --offload-arch=gfx950 -o kernel.so -shared -fPIC kernel.cpp
 
-# 配合 PyTorch
+# With PyTorch
 hipcc -O3 --offload-arch=gfx942 \
   $(python3 -c "import torch; from torch.utils.cpp_extension import include_paths; print(' '.join(['-I'+p for p in include_paths()]))")  \
   -shared -fPIC kernel.cpp -o kernel.so
 
-# 保存中间文件（用于 ISA 检查）
+# Save intermediate files (for ISA inspection)
 hipcc -save-temps --offload-arch=gfx942 kernel.cpp
-# 查找包含 ISA 的 *.s 文件
+# Look for *.s files containing ISA
 ```
 
-## 常用标志
+## Common Flags
 
-| 标志 | 用途 |
-|------|------|
-| `-O3` | 完整优化（必须使用） |
-| `--offload-arch=gfxNNN` | 目标 GPU 架构（必需） |
-| `-shared -fPIC` | 构建共享库供 Python 加载 |
-| `-save-temps` | 保留中间 .s（ISA）文件 |
-| `-Rpass=inline` | 显示内联决策 |
-| `-ffast-math` | 激进 FP 优化（可能影响精度） |
-| `-munsafe-fp-atomics` | 更快的原子 FP 操作（极少情况损失精度） |
+| Flag | Purpose |
+|------|---------|
+| `-O3` | Full optimization (must use) |
+| `--offload-arch=gfxNNN` | Target GPU architecture (required) |
+| `-shared -fPIC` | Build shared library for Python loading |
+| `-save-temps` | Retain intermediate .s (ISA) files |
+| `-Rpass=inline` | Show inlining decisions |
+| `-ffast-math` | Aggressive FP optimization (may affect precision) |
+| `-munsafe-fp-atomics` | Faster atomic FP operations (rarely loses precision) |
 
-## 常见错误与修复
+## Common Errors and Fixes
 
-| 错误 | 原因 | 修复 |
-|------|------|------|
-| `error: unknown target CPU 'gfx942'` | ROCm 版本过旧 | 更新 ROCm 或用 `rocminfo` 检查正确 arch |
-| `undefined reference to __hip_*` | 缺少 HIP runtime 链接 | 添加 `-lhip_hcc` 或用 `hipcc` 代替 `g++` |
-| `error: use of undeclared identifier '__shfl_sync'` | CUDA API 在 HIP 中不可用 | 使用 `__builtin_amdgcn_ds_swizzle` 或 `__shfl` |
-| `error: too few register available` | VGPR 过多 | 添加 `__launch_bounds__`，减少活跃变量 |
-| Kernel 运行但结果错误 | `--offload-arch` 不匹配 | 验证 arch 与 `rocminfo` 输出一致 |
-| 性能差，未使用 `-O3` | Debug 构建 | 始终使用 `-O3` 编译 |
+| Error | Cause | Fix |
+|-------|-------|-----|
+| `error: unknown target CPU 'gfx942'` | ROCm version too old | Update ROCm or use `rocminfo` to check correct arch |
+| `undefined reference to __hip_*` | Missing HIP runtime linkage | Add `-lhip_hcc` or use `hipcc` instead of `g++` |
+| `error: use of undeclared identifier '__shfl_sync'` | CUDA API not available in HIP | Use `__builtin_amdgcn_ds_swizzle` or `__shfl` |
+| `error: too few register available` | Too many VGPRs | Add `__launch_bounds__`, reduce live variables |
+| Kernel runs but produces wrong results | `--offload-arch` mismatch | Verify arch matches `rocminfo` output |
+| Poor performance, `-O3` not used | Debug build | Always compile with `-O3` |
 
-## PyTorch Extension 构建
+## PyTorch Extension Build
 
 ```python
 from torch.utils.hip_extension import load
